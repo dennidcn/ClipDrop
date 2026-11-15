@@ -1,0 +1,377 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-15T00:00:00Z",
+  "title": "Design System: ClipDrop",
+  "extensions": {
+    "colorMeta": {
+      "accent": {
+        "role": "primary",
+        "displayName": "Windows Default Accent",
+        "canonical": "#005fb8",
+        "tonalRamp": [
+          "#001a68",
+          "#003e92",
+          "#005fb8",
+          "#0078d4",
+          "#0093f9",
+          "#60cdff",
+          "#99ebff",
+          "#d6f6ff"
+        ]
+      },
+      "accent-dark": {
+        "role": "primary",
+        "displayName": "Windows Default Accent (dark theme)",
+        "canonical": "#60cdff",
+        "tonalRamp": [
+          "#001a68",
+          "#003e92",
+          "#005fb8",
+          "#0078d4",
+          "#0093f9",
+          "#60cdff",
+          "#99ebff",
+          "#d6f6ff"
+        ]
+      },
+      "accent-text": {
+        "role": "primary",
+        "displayName": "Accent Text",
+        "canonical": "#003e92",
+        "tonalRamp": [
+          "#001a68",
+          "#003e92",
+          "#005fb8",
+          "#0078d4",
+          "#0093f9",
+          "#60cdff",
+          "#99ebff",
+          "#d6f6ff"
+        ]
+      },
+      "accent-text-dark": {
+        "role": "primary",
+        "displayName": "Accent Text (dark theme)",
+        "canonical": "#99ebff",
+        "tonalRamp": [
+          "#001a68",
+          "#003e92",
+          "#005fb8",
+          "#0078d4",
+          "#0093f9",
+          "#60cdff",
+          "#99ebff",
+          "#d6f6ff"
+        ]
+      },
+      "solid-ground": {
+        "role": "neutral",
+        "displayName": "Solid Ground",
+        "canonical": "#f3f3f3",
+        "tonalRamp": [
+          "#1a1a1a",
+          "#202020",
+          "#2b2b2b",
+          "#3a3a3a",
+          "#8a8a8a",
+          "#c8c8c8",
+          "#e5e5e5",
+          "#f3f3f3"
+        ]
+      },
+      "solid-ground-dark": {
+        "role": "neutral",
+        "displayName": "Solid Ground (dark theme)",
+        "canonical": "#202020",
+        "tonalRamp": [
+          "#1a1a1a",
+          "#202020",
+          "#2b2b2b",
+          "#3a3a3a",
+          "#8a8a8a",
+          "#c8c8c8",
+          "#e5e5e5",
+          "#f3f3f3"
+        ]
+      },
+      "success": {
+        "role": "tertiary",
+        "displayName": "Success Green",
+        "canonical": "#0f7b0f",
+        "tonalRamp": [
+          "#062f06",
+          "#0a4f0a",
+          "#0f7b0f",
+          "#2e9a2e",
+          "#6ccb5f",
+          "#9fdc95",
+          "#cfeeca",
+          "#ecf8ea"
+        ]
+      },
+      "critical": {
+        "role": "tertiary",
+        "displayName": "Critical Red",
+        "canonical": "#c42b1c",
+        "tonalRamp": [
+          "#3d0d08",
+          "#6e170f",
+          "#c42b1c",
+          "#d9493b",
+          "#ff99a4",
+          "#ffc0c6",
+          "#fde7e9",
+          "#fff4f5"
+        ]
+      },
+      "caution": {
+        "role": "tertiary",
+        "displayName": "Caution Amber",
+        "canonical": "#9d5d00",
+        "tonalRamp": [
+          "#2f1c00",
+          "#5c3700",
+          "#9d5d00",
+          "#c98a00",
+          "#fce100",
+          "#ffef7a",
+          "#fff4ce",
+          "#fffbea"
+        ]
+      },
+      "caption-close": {
+        "role": "tertiary",
+        "displayName": "Caption Close Red",
+        "canonical": "#c42b1c",
+        "tonalRamp": [
+          "#3d0d08",
+          "#6e170f",
+          "#c42b1c",
+          "#d9493b",
+          "#ff99a4",
+          "#ffc0c6",
+          "#fde7e9",
+          "#fff4f5"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "title": {
+        "displayName": "Title",
+        "purpose": "Page headings (Downloads, Settings)."
+      },
+      "subtitle": {
+        "displayName": "Subtitle",
+        "purpose": "Empty-state headline."
+      },
+      "body-strong": {
+        "displayName": "Body Strong",
+        "purpose": "Settings group titles and the list heading."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Card and job titles, buttons, inputs; the window's base font."
+      },
+      "caption": {
+        "displayName": "Caption",
+        "purpose": "Window title, descriptions, job meta, field errors, footer, small buttons."
+      }
+    },
+    "icons": {
+      "family": "Segoe Fluent Icons, Segoe MDL2 Assets",
+      "sizes": {
+        "caption": "10px",
+        "chevron": "12px",
+        "button-and-tile": "16px",
+        "card": "20px",
+        "empty-state": "40px"
+      },
+      "note": "Font-based, provided by Windows; not bundled."
+    },
+    "shadows": [
+      {
+        "name": "focus-inner-ring",
+        "value": "0 0 0 1px var(--focus-inner)",
+        "purpose": "Inner contrast ring of the Fluent double-stroke focus visual, paired with outline: 2px solid var(--focus-outer) at 1px offset. The only box-shadow in the system."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-fade",
+        "value": "background-color 0.083s linear",
+        "purpose": "Hover and press fills on buttons, caption buttons, toggle track, job rows."
+      },
+      {
+        "name": "ease-out",
+        "value": "cubic-bezier(0, 0, 0, 1)",
+        "purpose": "Fluent decelerate curve for entrances, knob travel, progress width."
+      },
+      {
+        "name": "control-fast",
+        "value": "0.167s",
+        "purpose": "ToggleSwitch knob travel and resize."
+      },
+      {
+        "name": "page-in",
+        "value": "0.3s ease-out, translateY(24px) to 0 with fade",
+        "purpose": "Page swap between Downloads and Settings."
+      },
+      {
+        "name": "job-in",
+        "value": "0.25s ease-out, translateY(-8px) to 0 with fade",
+        "purpose": "New job row arrival."
+      },
+      {
+        "name": "indeterminate",
+        "value": "1.6s cubic-bezier(0.4, 0, 0.6, 1) infinite",
+        "purpose": "Indeterminate ProgressBar slide."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "0.01ms",
+        "purpose": "All animations and transitions collapse under prefers-reduced-motion; the indeterminate bar stops."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "window-min",
+        "value": "360px"
+      },
+      {
+        "name": "window-default",
+        "value": "440px"
+      }
+    ],
+    "themes": {
+      "light": "Default :root values.",
+      "dark": "@media (prefers-color-scheme: dark) overrides; mirrored by -dark keys in the frontmatter.",
+      "mica": "html.mica sets the body transparent so the native Mica backdrop shows; otherwise solid-ground."
+    },
+    "knownGaps": [
+      "The custom maximize button does not show the Snap Layouts flyout; that needs a native hit-test layer.",
+      "The ComboBox dropdown and `title=` tooltips are browser-drawn, not Fluent flyouts or tooltips.",
+      "Icons rely on the Segoe Fluent Icons font installed with Windows 11 (Segoe MDL2 Assets fallback on Windows 10); nothing is bundled.",
+      "Visual checks render at `preview/*.html` with a mocked Tauri API, regenerated by `preview/build.py`."
+    ]
+  },
+  "components": [
+    {
+      "name": "Standard Button",
+      "kind": "button",
+      "refersTo": "button-standard",
+      "description": "Default command button (Change, Check for updates, Try again).",
+      "html": "<button class=\"ds-btn\">Check for updates</button>",
+      "css": ".ds-btn { height: 32px; padding: 0 12px; font: 14px/20px \"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif; color: var(--text-1, rgba(0,0,0,0.896)); background: var(--control, rgba(255,255,255,0.7)); border: 1px solid var(--control-stroke, rgba(0,0,0,0.0578)); border-bottom-color: var(--control-stroke-bottom, rgba(0,0,0,0.1622)); border-radius: 4px; transition: background-color 0.083s linear; } .ds-btn:hover { background: var(--control-hover, rgba(249,249,249,0.5)); } .ds-btn:active { background: var(--control-press, rgba(249,249,249,0.3)); color: var(--text-2, rgba(0,0,0,0.606)); border-bottom-color: var(--control-stroke, rgba(0,0,0,0.0578)); } .ds-btn:focus-visible { outline: 2px solid var(--focus-outer, rgba(0,0,0,0.896)); outline-offset: 1px; box-shadow: 0 0 0 1px var(--focus-inner, #fff); }"
+    },
+    {
+      "name": "Accent Button",
+      "kind": "button",
+      "refersTo": "button-accent",
+      "description": "The one primary action per view (Download).",
+      "html": "<button class=\"ds-btn-accent\">Download</button>",
+      "css": ".ds-btn-accent { height: 32px; padding: 0 12px; font: 14px/20px \"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif; color: var(--on-accent, #fff); background: var(--accent, #005fb8); border: 1px solid rgba(255,255,255,0.08); border-bottom-color: rgba(0,0,0,0.4); border-radius: 4px; transition: background-color 0.083s linear; } .ds-btn-accent:hover { background: var(--accent-hover, rgba(0,95,184,0.9)); } .ds-btn-accent:active { background: var(--accent-press, rgba(0,95,184,0.8)); } .ds-btn-accent:focus-visible { outline: 2px solid var(--focus-outer, rgba(0,0,0,0.896)); outline-offset: 1px; box-shadow: 0 0 0 1px var(--focus-inner, #fff); }"
+    },
+    {
+      "name": "Subtle Icon Button",
+      "kind": "button",
+      "refersTo": "button-icon",
+      "description": "Transparent 32px icon button for row and page actions. The build draws its glyph from Segoe Fluent Icons; inlined here as SVG.",
+      "html": "<button class=\"ds-btn-icon\" aria-label=\"Show in folder\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\"><path d=\"M1.5 3.5h4l1.5 1.5h7.5v8h-13z\"/></svg></button>",
+      "css": ".ds-btn-icon { width: 32px; height: 32px; display: inline-grid; place-items: center; padding: 0; color: var(--text-1, rgba(0,0,0,0.896)); background: transparent; border: 1px solid transparent; border-radius: 4px; transition: background-color 0.083s linear; } .ds-btn-icon:hover { background: var(--subtle-hover, rgba(0,0,0,0.0373)); } .ds-btn-icon:active { background: var(--subtle-press, rgba(0,0,0,0.0241)); } .ds-btn-icon:focus-visible { outline: 2px solid var(--focus-outer, rgba(0,0,0,0.896)); outline-offset: 1px; box-shadow: 0 0 0 1px var(--focus-inner, #fff); }"
+    },
+    {
+      "name": "TextBox",
+      "kind": "input",
+      "refersTo": "textbox",
+      "description": "Link paste field; 2px accent underline on focus.",
+      "html": "<input class=\"ds-textbox\" type=\"text\" placeholder=\"Paste a link to an X, Instagram or TikTok post\">",
+      "css": ".ds-textbox { width: 320px; height: 32px; padding: 0 11px; font: 14px/20px \"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif; color: var(--text-1, rgba(0,0,0,0.896)); background: var(--control, rgba(255,255,255,0.7)); border: 1px solid var(--control-stroke, rgba(0,0,0,0.0578)); border-bottom-color: var(--control-strong, rgba(0,0,0,0.6)); border-radius: 4px; } .ds-textbox::placeholder { color: var(--text-2, rgba(0,0,0,0.606)); } .ds-textbox:hover { background: var(--control-hover, rgba(249,249,249,0.5)); } .ds-textbox:focus { outline: none; background: var(--control-input, #fff); border-bottom: 2px solid var(--accent, #005fb8); padding-bottom: 1px; }"
+    },
+    {
+      "name": "Settings Card with ToggleSwitch",
+      "kind": "card",
+      "refersTo": "settings-card",
+      "description": "The unit of the system: glyph, title, description, control at the right.",
+      "html": "<section class=\"ds-card\"><svg class=\"ds-card-icon\" width=\"20\" height=\"20\" viewBox=\"0 0 20 20\" fill=\"none\" stroke=\"currentColor\"><rect x=\"5.5\" y=\"3.5\" width=\"9\" height=\"13\" rx=\"1.5\"/><path d=\"M8 3.5v-1h4v1\"/></svg><div class=\"ds-card-text\"><span>Watch clipboard</span><span class=\"ds-card-desc\">Saves videos as soon as you copy a link.</span></div><label class=\"ds-toggle\"><span>On</span><input type=\"checkbox\" role=\"switch\" checked><span class=\"ds-track\"><span class=\"ds-knob\"></span></span></label></section>",
+      "css": ".ds-card { display: flex; align-items: center; gap: 16px; min-height: 68px; width: 400px; padding: 12px 16px; font: 14px/20px \"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif; color: var(--text-1, rgba(0,0,0,0.896)); background: var(--card, rgba(255,255,255,0.7)); border: 1px solid var(--card-stroke, rgba(0,0,0,0.0578)); border-radius: 6px; } .ds-card-icon { flex: none; } .ds-card-text { flex: 1; display: flex; flex-direction: column; } .ds-card-desc { font-size: 12px; line-height: 16px; color: var(--text-2, rgba(0,0,0,0.606)); } .ds-toggle { display: flex; align-items: center; gap: 12px; } .ds-toggle input { position: absolute; opacity: 0; width: 1px; height: 1px; } .ds-track { position: relative; width: 40px; height: 20px; border-radius: 10px; border: 1px solid var(--control-strong, rgba(0,0,0,0.6)); background: var(--track, rgba(0,0,0,0.0578)); transition: background-color 0.083s linear; } .ds-knob { position: absolute; top: 50%; left: 3px; width: 12px; height: 12px; margin-top: -6px; border-radius: 50%; background: var(--text-2, rgba(0,0,0,0.606)); transition: left 0.167s cubic-bezier(0,0,0,1), width 0.167s cubic-bezier(0,0,0,1), height 0.167s cubic-bezier(0,0,0,1), margin 0.167s cubic-bezier(0,0,0,1); } .ds-toggle:hover .ds-knob { width: 14px; height: 14px; margin-top: -7px; left: 2px; } .ds-toggle:active .ds-knob { width: 17px; } .ds-toggle input:checked + .ds-track { background: var(--accent, #005fb8); border-color: transparent; } .ds-toggle input:checked + .ds-track .ds-knob { left: 23px; background: var(--on-accent, #fff); } .ds-toggle:hover input:checked + .ds-track { background: var(--accent-hover, rgba(0,95,184,0.9)); } .ds-toggle:hover input:checked + .ds-track .ds-knob { left: 22px; } .ds-toggle input:focus-visible + .ds-track { outline: 2px solid var(--focus-outer, rgba(0,0,0,0.896)); outline-offset: 2px; }"
+    },
+    {
+      "name": "Job Row",
+      "kind": "custom",
+      "refersTo": "job-row",
+      "description": "Download list card: state glyph tile, title, platform and progress meta, inline Fluent ProgressBar.",
+      "html": "<div class=\"ds-job\"><span class=\"ds-tile\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 16 16\" fill=\"none\" stroke=\"currentColor\"><path d=\"M8 2v9M4.5 7.5 8 11l3.5-3.5M3 14h10\"/></svg></span><div class=\"ds-job-body\"><span class=\"ds-job-title\">x.com/someone/status/1890</span><span class=\"ds-job-meta\">X · 42% · 3.1 MB/s</span><div class=\"ds-progress\"><div class=\"ds-progress-bar\" style=\"width:42%\"></div></div></div></div>",
+      "css": ".ds-job { display: grid; grid-template-columns: 32px minmax(0,1fr); column-gap: 12px; align-items: center; min-height: 60px; width: 400px; padding: 10px 8px 10px 12px; font: 14px/20px \"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif; color: var(--text-1, rgba(0,0,0,0.896)); background: var(--card, rgba(255,255,255,0.7)); border: 1px solid var(--card-stroke, rgba(0,0,0,0.0578)); border-radius: 6px; transition: background-color 0.083s linear; } .ds-job:hover { background: var(--card-hover, rgba(249,249,249,0.5)); } .ds-tile { width: 32px; height: 32px; display: grid; place-items: center; border-radius: 4px; background: var(--subtle-hover, rgba(0,0,0,0.0373)); color: var(--accent, #005fb8); } .ds-job-body { min-width: 0; display: flex; flex-direction: column; } .ds-job-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; } .ds-job-meta { font-size: 12px; line-height: 16px; color: var(--text-2, rgba(0,0,0,0.606)); font-variant-numeric: tabular-nums; } .ds-progress { position: relative; height: 3px; margin-top: 6px; display: flex; align-items: center; } .ds-progress::before { content: \"\"; position: absolute; left: 0; right: 0; height: 1px; background: var(--control-strong, rgba(0,0,0,0.6)); } .ds-progress-bar { position: relative; height: 3px; border-radius: 2px; background: var(--accent, #005fb8); transition: width 0.25s cubic-bezier(0,0,0,1); }"
+    },
+    {
+      "name": "Error InfoBar",
+      "kind": "custom",
+      "refersTo": "infobar-error",
+      "description": "Inline severity bar: glyph disc, bold title and message, one fix action.",
+      "html": "<div class=\"ds-infobar\"><span class=\"ds-infobar-icon\"><svg width=\"8\" height=\"8\" viewBox=\"0 0 8 8\" stroke=\"currentColor\" stroke-width=\"1.5\"><path d=\"M1 1l6 6M7 1 1 7\"/></svg></span><div class=\"ds-infobar-text\"><strong>Downloader unavailable.</strong> yt-dlp could not be installed.</div><button class=\"ds-infobar-btn\">Try again</button></div>",
+      "css": ".ds-infobar { display: flex; align-items: center; gap: 12px; min-height: 48px; width: 400px; padding: 8px 8px 8px 16px; font: 14px/20px \"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif; color: var(--text-1, rgba(0,0,0,0.896)); background: var(--critical-bg, #fde7e9); border: 1px solid var(--card-stroke, rgba(0,0,0,0.0578)); border-radius: 6px; } .ds-infobar-icon { flex: none; width: 16px; height: 16px; border-radius: 50%; display: grid; place-items: center; background: var(--critical, #c42b1c); color: var(--solid-bg, #f3f3f3); } .ds-infobar-text { flex: 1; } .ds-infobar-btn { height: 32px; padding: 0 12px; font: inherit; color: inherit; background: var(--control, rgba(255,255,255,0.7)); border: 1px solid var(--control-stroke, rgba(0,0,0,0.0578)); border-bottom-color: var(--control-stroke-bottom, rgba(0,0,0,0.1622)); border-radius: 4px; transition: background-color 0.083s linear; } .ds-infobar-btn:hover { background: var(--control-hover, rgba(249,249,249,0.5)); } .ds-infobar-btn:focus-visible { outline: 2px solid var(--focus-outer, rgba(0,0,0,0.896)); outline-offset: 1px; box-shadow: 0 0 0 1px var(--focus-inner, #fff); }"
+    },
+    {
+      "name": "Title Bar",
+      "kind": "nav",
+      "refersTo": "caption-button",
+      "description": "40px custom frame with 46x40 caption buttons and a red close hover. Glyphs are Segoe Fluent Icons in the build; inlined here as SVG.",
+      "html": "<header class=\"ds-titlebar\"><span class=\"ds-titlebar-name\">ClipDrop</span><button class=\"ds-cap\" aria-label=\"Minimize\"><svg width=\"10\" height=\"10\" viewBox=\"0 0 10 10\" stroke=\"currentColor\"><path d=\"M0 5h10\"/></svg></button><button class=\"ds-cap\" aria-label=\"Maximize\"><svg width=\"10\" height=\"10\" viewBox=\"0 0 10 10\" fill=\"none\" stroke=\"currentColor\"><rect x=\"0.5\" y=\"0.5\" width=\"9\" height=\"9\" rx=\"1\"/></svg></button><button class=\"ds-cap ds-cap-close\" aria-label=\"Close\"><svg width=\"10\" height=\"10\" viewBox=\"0 0 10 10\" stroke=\"currentColor\"><path d=\"M0 0l10 10M10 0 0 10\"/></svg></button></header>",
+      "css": ".ds-titlebar { display: flex; align-items: stretch; height: 40px; width: 440px; padding-left: 16px; font: 12px/16px \"Segoe UI Variable Text\", \"Segoe UI\", system-ui, sans-serif; color: var(--text-1, rgba(0,0,0,0.896)); background: var(--solid-bg, #f3f3f3); } .ds-titlebar-name { flex: 1; align-self: center; } .ds-cap { width: 46px; border: 0; background: transparent; color: inherit; display: grid; place-items: center; transition: background-color 0.083s linear; } .ds-cap:hover { background: var(--subtle-hover, rgba(0,0,0,0.0373)); } .ds-cap:active { background: var(--subtle-press, rgba(0,0,0,0.0241)); } .ds-cap-close:hover { background: #c42b1c; color: #fff; } .ds-cap-close:active { background: rgba(196,43,28,0.9); color: rgba(255,255,255,0.7); } .ds-cap:focus-visible { outline: 2px solid var(--focus-outer, rgba(0,0,0,0.896)); outline-offset: -2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The First-Party Utility",
+    "overview": "ClipDrop is drawn as if Microsoft shipped it in PowerToys. There is no metaphor and no themed world: the Windows 11 Fluent category standard is played straight, and the craft lives in getting the conventions exactly right (WinUI 3 resource values, the Fluent type ramp, double-stroke focus, settings-card anatomy, 46×40 caption buttons). The window is a receipt, glanced at for a few seconds while the app works from the tray, so it is dense, quiet, and immediately legible.\n\nDepth comes from the material stack rather than shadow: a Mica backdrop (applied natively; the body goes transparent under `html.mica`, otherwise a solid neutral ground), translucent layer cards over it, and hairline 1px strokes. The theme follows the system light/dark setting through `prefers-color-scheme`; every token has a light and dark value. Color is almost entirely neutral; the Windows default accent blue appears only on the primary action, checked toggles, progress, focus underline, and selection.\n\nThe system rejects the generic web-app look: no web header, no centered hero input, no footer drawer, no decorative shadows, no brand-color washes.",
+    "keyCharacteristics": [
+      "Native Windows 11 Fluent anatomy: custom 40px title bar, caption buttons at the right, settings cards, InfoBar, ToggleSwitch, ProgressBar, ComboBox.",
+      "WinUI 3 light/dark resource values, switched by the system theme.",
+      "Mica or solid ground, translucent cards, 1px hairlines; no drop shadows.",
+      "Segoe UI Variable on the Fluent ramp (Caption 12, Body 14, Subtitle 20, Title 28).",
+      "Segoe Fluent Icons as the only icon set.",
+      "Fluent motion: 83ms linear state fades, decelerating `cubic-bezier(0, 0, 0, 1)` entrances, all collapsed under reduced motion."
+    ],
+    "rules": [
+      {
+        "name": "The System Accent Rule",
+        "body": "The only chromatic UI color is the Windows default accent. The violet of the placeholder app icon is not a UI color and never appears outside the icon.",
+        "section": "colors"
+      },
+      {
+        "name": "The Paired Theme Rule",
+        "body": "Every color is defined twice, light and dark, from the WinUI 3 resources; a value without its dark twin is not a token.",
+        "section": "colors"
+      },
+      {
+        "name": "The Fluent Ramp Rule",
+        "body": "Sizes come only from the Fluent ramp (12, 14, 20, 28). No in-between sizes, no letter-spacing, no uppercase labels.",
+        "section": "typography"
+      },
+      {
+        "name": "The Material Not Shadow Rule",
+        "body": "Separation comes from fill alpha and hairline strokes. If an element needs to stand apart, change its layer, not its shadow.",
+        "section": "elevation"
+      },
+      {
+        "name": "The Double Stroke Focus Rule",
+        "body": "Keyboard focus is a 2px outer stroke (text-primary contrast) offset 1px with a 1px inner contrast ring; inside the title bar the outline is inset (-2px). Focus is never shown on pointer click.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** take every color from the WinUI 3 light/dark resources and define both themes.",
+      "**Do** build new settings as settings cards (glyph, title, description, control at the right) in groups with a Body Strong title.",
+      "**Do** use Segoe Fluent Icons code points for every glyph, with Segoe MDL2 Assets as fallback.",
+      "**Do** keep state transitions at 83ms linear and entrances on `cubic-bezier(0, 0, 0, 1)`, and collapse all motion under `prefers-reduced-motion`.",
+      "**Do** keep one accent button per view.",
+      "**Do** keep the body transparent under `html.mica` so the native backdrop shows through."
+    ],
+    "donts": [
+      "**Don't** add drop shadows, glows, or gradients; depth is layer fill and hairline only.",
+      "**Don't** use colors outside the token set, including the app icon's violet.",
+      "**Don't** introduce sizes off the Fluent ramp, uppercase labels, or letter-spacing.",
+      "**Don't** add a web-style header, centered hero input, or footer drawer.",
+      "**Don't** use radii other than 4px (controls), 6px (layers) and the toggle pill."
+    ]
+  }
+}

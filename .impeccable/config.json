@@ -1,0 +1,23 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "marquee",
+        "value": "*",
+        "files": [
+          "src/index.html"
+        ],
+        "createdAt": "2026-11-15T15:53:11.076Z",
+        "reason": "agent: native Fluent indeterminate ProgressBar motion, shown only while a download size is unknown; canon Windows 11 direction chosen by user"
+      },
+      {
+        "rule": "design-system-font",
+        "value": "segoe fluent icons",
+        "createdAt": "2026-11-15T16:02:50.775Z",
+        "reason": "agent: Windows system icon font, documented as the icon system in DESIGN.md, not a text face"
+      }
+    ]
+  }
+}

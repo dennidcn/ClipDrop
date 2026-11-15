@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ClipDrop</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="main.js" defer></script>
+  </head>
+  <body>
+    <header class="titlebar" data-tauri-drag-region>
+      <button id="back" class="caption-back" aria-label="Back to downloads" title="Back" hidden><span class="glyph">&#xE72B;</span></button>
+      <svg class="app-icon" viewBox="0 0 512 512" aria-hidden="true">
+        <rect width="512" height="512" rx="112" fill="#7c3aed" />
+        <path d="M256 120v196M170 236l86 86 86-86M146 384h220" fill="none" stroke="#fff" stroke-width="44" stroke-linecap="round" stroke-linejoin="round" />
+      </svg>
+      <span class="app-title" data-tauri-drag-region>ClipDrop</span>
+      <div class="caption">
+        <button id="win-min" class="caption-btn" aria-label="Minimize" title="Minimize"><span class="glyph">&#xE921;</span></button>
+        <button id="win-max" class="caption-btn" aria-label="Maximize" title="Maximize"><span class="glyph">&#xE922;</span></button>
+        <button id="win-close" class="caption-btn close" aria-label="Close to tray" title="Close (keeps watching in the tray)"><span class="glyph">&#xE8BB;</span></button>
+      </div>
+    </header>
+
+    <!-- Downloads -->
+    <main class="page" id="page-downloads">
+      <div class="page-head">
+        <h1>Downloads</h1>
+        <button id="open-settings" class="btn subtle icon" aria-label="Settings" title="Settings"><span class="glyph">&#xE713;</span></button>
+      </div>
+
+      <div id="tool-bar" class="infobar" hidden>
+        <span class="glyph infobar-icon" aria-hidden="true"></span>
+        <div class="infobar-text"><strong id="tool-title"></strong> <span id="tool-msg"></span></div>
+        <button id="tool-retry" class="btn" hidden>Try again</button>
+      </div>
+
+      <section class="card watch">
+        <span class="glyph card-icon" aria-hidden="true">&#xE77F;</span>
+        <div class="card-text">
+          <span class="card-title" id="watch-title">Watch clipboard</span>
+          <span class="card-desc" id="watch-desc"></span>
+        </div>
+        <label class="toggle">
+          <span class="toggle-state" id="watch-state">On</span>
+          <input type="checkbox" role="switch" id="watch" aria-labelledby="watch-title" />
+          <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+        </label>
+      </section>
+
+      <form id="add-form" class="add">
+        <div class="textbox">
+          <input id="add-input" type="text" placeholder="Paste a link to an X, Instagram or TikTok post" autocomplete="off" spellcheck="false" aria-label="Post link" />
+        </div>
+        <button type="submit" class="btn accent">Download</button>
+      </form>
+      <p id="add-error" class="field-error" role="alert" hidden></p>
+
+      <div class="list-head" id="list-head" hidden>
+        <h2 id="count">Recent</h2>
+        <button id="clear" class="btn subtle small">Clear finished</button>
+      </div>
+      <ul id="jobs" class="jobs" aria-live="polite"></ul>
+
+      <div id="empty" class="empty">
+        <span class="glyph empty-icon" aria-hidden="true">&#xE896;</span>
+        <p class="empty-title">Copy a link to get started</p>
+        <p class="empty-body">ClipDrop saves the video from an X, Instagram or TikTok post as soon as you copy its link. Leave it running in the tray.</p>
+      </div>
+    </main>
+
+    <!-- Settings -->
+    <main class="page" id="page-settings" hidden>
+      <div class="page-head">
+        <h1 tabindex="-1" id="settings-title">Settings</h1>
+      </div>
+
+      <h2 class="group-title">Downloads</h2>
+      <div class="group">
+        <section class="card">
+          <span class="glyph card-icon" aria-hidden="true">&#xE8B7;</span>
+          <div class="card-text">
+            <span class="card-title">Save location</span>
+            <span class="card-desc path" id="folder-path"></span>
+          </div>
+          <div class="card-actions">
+            <button id="open-folder" class="btn subtle icon" aria-label="Open folder" title="Open folder"><span class="glyph">&#xE8A7;</span></button>
+            <button id="folder" class="btn">Change</button>
+          </div>
+        </section>
+        <section class="card">
+          <span class="glyph card-icon" aria-hidden="true">&#xE896;</span>
+          <div class="card-text">
+            <span class="card-title" id="auto-title">Download automatically</span>
+            <span class="card-desc">When off, copied links wait in the list until you start them.</span>
+          </div>
+          <label class="toggle">
+            <span class="toggle-state">On</span>
+            <input type="checkbox" role="switch" id="auto" aria-labelledby="auto-title" />
+            <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+          </label>
+        </section>
+        <section class="card">
+          <span class="glyph card-icon" aria-hidden="true">&#xEA8F;</span>
+          <div class="card-text">
+            <span class="card-title" id="notify-title">Notifications</span>
+            <span class="card-desc">Tell me when a download finishes while ClipDrop is in the background.</span>
+          </div>
+          <label class="toggle">
+            <span class="toggle-state">On</span>
+            <input type="checkbox" role="switch" id="notify" aria-labelledby="notify-title" />
+            <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
+          </label>
+        </section>
+      </div>
+
+      <h2 class="group-title">Sign-in</h2>
+      <div class="group">
+        <section class="card">
+          <span class="glyph card-icon" aria-hidden="true">&#xE774;</span>
+          <div class="card-text">
+            <span class="card-title" id="cookies-title">Use browser sign-in</span>
+            <span class="card-desc">Some Instagram posts only download when you're logged in. Firefox works best; close Chrome or Edge first.</span>
+          </div>
+          <div class="combo">
+            <select id="cookies" aria-labelledby="cookies-title">
+              <option value="">None</option>
+              <option value="firefox">Firefox</option>
+              <option value="chrome">Chrome</option>
+              <option value="edge">Edge</option>
+              <option value="brave">Brave</option>
+            </select>
+            <span class="glyph combo-chevron" aria-hidden="true">&#xE70D;</span>
+          </div>
+        </section>
+      </div>
+
+      <h2 class="group-title">About</h2>
+      <div class="group">
+        <section class="card">
+          <span class="glyph card-icon" aria-hidden="true">&#xE895;</span>
+          <div class="card-text">
+            <span class="card-title">Downloader engine</span>
+            <span class="card-desc" id="engine-desc">yt-dlp, kept up to date by ClipDrop. Update it if a site stops working.</span>
+          </div>
+          <button id="update" class="btn">Check for updates</button>
+        </section>
+      </div>
+      <p class="settings-foot">ClipDrop 0.1.0 · Close the window to keep it running in the tray. Quit from the tray icon.</p>
+    </main>
+  </body>
+</html>
