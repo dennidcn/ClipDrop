@@ -3,6 +3,8 @@
 //
 //   npm run release -- --notes "What changed"            build only, then upload by hand
 //   npm run release -- --notes "What changed" --publish  also create the GitHub release (needs `gh`)
+//   npm run release -- --notes-file notes.md --publish   notes from a file (use this for multi-line notes:
+//                                                        Windows' shell cuts a multi-line --notes short)
 //
 // Before releasing, bump "version" in src-tauri/tauri.conf.json (and Cargo.toml / package.json).
 //
@@ -27,13 +29,19 @@ const option = (name) => {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 };
-const notes = option("--notes") ?? "";
-const publish = flag("--publish");
-
 const fail = (msg) => {
   console.error(`\nrelease: ${msg}`);
   process.exit(1);
 };
+
+const notesFile = option("--notes-file");
+if (notesFile && !fs.existsSync(notesFile)) fail(`notes file not found: ${notesFile}`);
+const notes = (notesFile ? fs.readFileSync(notesFile, "utf8") : option("--notes") ?? "").trim();
+const publish = flag("--publish");
+// Catch arguments the shell mangled (e.g. a multi-line --notes) before spending minutes on a build.
+const known = new Set(["--notes", "--notes-file", "--publish"]);
+const unknown = args.filter((a, i) => a.startsWith("--") && !known.has(a) && !["--notes", "--notes-file"].includes(args[i - 1]));
+if (unknown.length) fail(`unknown option(s): ${unknown.join(", ")}`);
 
 // The updater endpoint names the GitHub repo that hosts releases.
 const endpoint = conf.plugins?.updater?.endpoints?.[0] ?? "";

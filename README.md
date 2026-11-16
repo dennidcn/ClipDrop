@@ -6,7 +6,7 @@ Paste a link, get the file. ClipDrop is a small Windows app for saving posts fro
 
 ## Download
 
-Get `ClipDrop_<version>_x64-setup.exe` from the [latest release](https://github.com/dennidcn/twitter-video-downloader/releases/latest) and run it. ClipDrop runs on Windows 10 and 11 and updates itself after that.
+Get `ClipDrop_<version>_x64-setup.exe` from the [latest release](https://github.com/dennidcn/ClipDrop/releases/latest) and run it. ClipDrop runs on Windows 10 and 11 and updates itself after that.
 
 There's nothing else to install. ClipDrop fetches the tools it needs the first time it needs them:
 
@@ -70,7 +70,7 @@ The `preview/` pages show the UI in a browser with mock data; regenerate them wi
 ClipDrop updates itself. It checks this repo's latest GitHub release shortly after launch and every 12 hours. An update is only installed if it is signed with the release key, whose public half is in `src-tauri/tauri.conf.json`.
 
 1. Bump the version in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `package.json` and the settings footer in `src/index.html`.
-2. Run `npm run release -- --notes "What changed" --publish`. This builds the installer, signs it with the key in `~/.tauri/clipdrop.key`, writes `latest.json`, and creates the GitHub release with `gh`. It asks for the key's password, or reads it from `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. `gh` must be logged in with permission to write the repo's contents.
+2. Run `npm run release -- --notes-file notes.md --publish` (or `--notes "One line"`; multi-line notes must come from a file, because the Windows shell cuts them short). This builds the installer, signs it with the key in `~/.tauri/clipdrop.key`, writes `latest.json`, and creates the GitHub release with `gh`. It asks for the key's password, or reads it from `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`. `gh` must be logged in with permission to write the repo's contents.
 3. Without `--publish`, create a release tagged `v<version>` yourself and attach `ClipDrop_<version>_x64-setup.exe` and `latest.json`.
 
 Keep a backup of `~/.tauri/clipdrop.key` and its password. Without them, installed copies can't be updated.
