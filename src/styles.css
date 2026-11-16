@@ -337,7 +337,8 @@ body.inactive .app-icon { opacity: 0.5; }
 }
 .textbox input::placeholder { color: var(--text-2); }
 .textbox input:hover { background: var(--control-hover); }
-.textbox input:focus {
+.textbox input:focus,
+.add.drop-target .textbox input {
   background: var(--control-input);
   border-bottom: 2px solid var(--accent);
   padding-bottom: 1px;

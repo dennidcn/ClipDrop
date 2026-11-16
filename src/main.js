@@ -254,6 +254,35 @@ function suppressBrowserChrome() {
   });
 }
 
+// ---------- drag and drop ----------
+
+const carriesText = (dt) => dt.types.includes("text/uri-list") || dt.types.includes("text/plain");
+
+/** A dragged link arrives as text/uri-list (one URL per line, "#" lines are comments); selected text as text/plain. */
+function droppedText(dt) {
+  const uris = dt.getData("text/uri-list").split(/\r?\n/).filter((l) => l && !l.startsWith("#"));
+  return (uris.length ? uris.join("\n") : dt.getData("text/plain")).trim();
+}
+
+/** Dropping a link on a box downloads it straight away, like pasting it and pressing Download. */
+function initDropTarget(form, addLinks) {
+  form.addEventListener("dragover", (e) => {
+    if (!carriesText(e.dataTransfer)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    form.classList.add("drop-target");
+  });
+  form.addEventListener("dragleave", (e) => {
+    if (!form.contains(e.relatedTarget)) form.classList.remove("drop-target");
+  });
+  form.addEventListener("drop", (e) => {
+    e.preventDefault();
+    form.classList.remove("drop-target");
+    const text = droppedText(e.dataTransfer);
+    if (text) addLinks(text);
+  });
+}
+
 function showAddError(form, msg) {
   const error = form.querySelector(".field-error");
   error.textContent = msg || "";
@@ -300,13 +329,10 @@ async function init() {
   });
   await listen("tool-status", ({ payload }) => renderToolStatus(payload));
 
-  // Two boxes: the one a link is pasted into decides MP4 (video) or MP3 (audio).
+  // Two boxes: the one a link is pasted (or dropped) into decides MP4 (video) or MP3 (audio).
   for (const form of document.querySelectorAll("form.add")) {
     const input = form.querySelector("input");
-    form.addEventListener("submit", async (e) => {
-      e.preventDefault();
-      const text = input.value.trim();
-      if (!text) return;
+    const addLinks = async (text) => {
       try {
         await invoke("add_url", { text, format: form.dataset.format });
         input.value = "";
@@ -314,9 +340,17 @@ async function init() {
       } catch (err) {
         showAddError(form, String(err));
       }
+    };
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (text) addLinks(text);
     });
     input.addEventListener("input", () => showAddError(form, ""));
+    initDropTarget(form, addLinks);
   }
+  // Anything dropped outside the boxes is ignored, rather than the webview navigating to it.
+  for (const type of ["dragover", "drop"]) document.addEventListener(type, (e) => e.preventDefault());
 
   $("notify").addEventListener("change", (e) => saveSettings({ notify: e.target.checked }));
   $("cookies").addEventListener("change", (e) => saveSettings({ cookiesBrowser: e.target.value }));
