@@ -255,6 +255,23 @@ mod tests {
     }
 
     #[test]
+    fn canonical_urls_are_stable() {
+        // The saved downloads list is only restored for links that come back unchanged.
+        for url in [
+            "https://twitter.com/someone/status/1790000000000000000?s=20",
+            "https://instagram.com/reels/C1a2B3c4D5e",
+            "https://www.instagram.com/some.user/p/C1a2B3c4D5e/",
+            "https://www.tiktok.com/@some.user/video/7300000000000000000?is_from_webapp=1",
+            "https://vt.tiktok.com/ZSabc123",
+            "https://www.tiktok.com/t/ZTabc123/",
+            "https://youtu.be/dQw4w9WgXcQ?si=abc",
+        ] {
+            let first = one(url);
+            assert_eq!(one(&first.url), first, "{url}");
+        }
+    }
+
+    #[test]
     fn caps_extracted_links_and_truncates_large_inputs() {
         let many: String = (1..=50)
             .map(|i| format!("https://x.com/user/status/{i} "))

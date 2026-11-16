@@ -1,15 +1,16 @@
 mod downloader;
+mod history;
 mod links;
 mod settings;
 mod updater;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
@@ -71,7 +72,7 @@ impl Drop for DownloadPermit<'_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum JobStatus {
     Downloading,
@@ -131,6 +132,72 @@ struct Job {
     destinations: Vec<String>,
 }
 
+/// A job as saved in the history file. Unlike the UI's view of it, this keeps `destinations`,
+/// so a job paused before a restart can still be stopped and cleaned up afterwards.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredJob {
+    id: u64,
+    url: String,
+    platform: Platform,
+    format: Format,
+    status: JobStatus,
+    title: Option<String>,
+    #[serde(default)]
+    progress: f64,
+    file: Option<String>,
+    error: Option<String>,
+    #[serde(default)]
+    destinations: Vec<String>,
+}
+
+impl From<&Job> for StoredJob {
+    fn from(j: &Job) -> Self {
+        Self {
+            id: j.id,
+            url: j.url.clone(),
+            platform: j.platform,
+            format: j.format,
+            // A download running when ClipDrop exits is resumable from its partial files next time.
+            status: if j.status == JobStatus::Downloading { JobStatus::Paused } else { j.status },
+            title: j.title.clone(),
+            progress: j.progress,
+            file: j.file.clone(),
+            error: j.error.clone(),
+            destinations: j.destinations.clone(),
+        }
+    }
+}
+
+impl StoredJob {
+    /// Turns a saved job back into a list entry. Drops it if its link isn't one ClipDrop recognises
+    /// (only those are ever handed to yt-dlp, even from its own file), or if it was saved but the
+    /// file has since been moved or deleted.
+    fn restore(self) -> Option<Job> {
+        let link = links::extract(&self.url).into_iter().next()?;
+        if link.url != self.url || link.platform != self.platform {
+            return None;
+        }
+        if self.status == JobStatus::Done && !self.file.as_deref().is_some_and(|f| Path::new(f).is_file()) {
+            return None;
+        }
+        Some(Job {
+            id: self.id,
+            url: self.url,
+            platform: self.platform,
+            format: self.format,
+            status: if self.status == JobStatus::Downloading { JobStatus::Paused } else { self.status },
+            title: self.title,
+            progress: if self.progress.is_finite() { self.progress.clamp(0.0, 1.0) } else { 0.0 },
+            speed: None,
+            converting: false,
+            file: self.file,
+            error: self.error,
+            destinations: self.destinations,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum ToolStatus {
@@ -146,6 +213,8 @@ enum ToolStatus {
 struct AppState {
     settings: Mutex<Settings>,
     jobs: Mutex<Vec<Job>>,
+    /// Held while writing the history file, so saves land in order. Lock order: this, then `jobs`.
+    history_io: Mutex<()>,
     /// The running download of each downloading job. Lock order: `jobs`, then `controls`.
     controls: Mutex<HashMap<u64, Arc<Control>>>,
     next_id: AtomicU64,
@@ -321,6 +390,24 @@ fn update_job(app: &AppHandle, id: u64, f: impl FnOnce(&mut Job)) -> Option<Job>
     Some(job)
 }
 
+/// Saves the downloads list. Call after any change except progress, without `jobs` locked.
+fn save_history(app: &AppHandle) {
+    // Once quitting, the list was saved just before downloads were stopped; saving again would
+    // record those stopped downloads as failures.
+    if !QUITTING.load(Ordering::SeqCst) {
+        write_history(app);
+    }
+}
+
+fn write_history(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let _io = state.history_io.lock().unwrap();
+    let stored: Vec<StoredJob> = state.jobs.lock().unwrap().iter().map(StoredJob::from).collect();
+    if let Err(e) = history::save(app, &stored) {
+        eprintln!("[clipdrop] couldn't save the downloads list: {e}");
+    }
+}
+
 /// Adds and starts a job for `link` unless one for the same post and format already exists
 /// (and didn't fail or get stopped). The same post can be saved as both MP4 and MP3.
 /// Pasting the link of a paused job again resumes it.
@@ -361,6 +448,7 @@ fn add_job(app: &AppHandle, link: Link, format: Format) -> Job {
     drop(jobs);
     let _ = app.emit("job-updated", &job);
     spawn_download(app.clone(), job.clone(), control);
+    save_history(app);
     job
 }
 
@@ -395,6 +483,7 @@ fn start_job(app: &AppHandle, id: u64) -> Option<Job> {
     };
     let _ = app.emit("job-updated", &job);
     spawn_download(app.clone(), job.clone(), control);
+    save_history(app);
     Some(job)
 }
 
@@ -500,6 +589,7 @@ fn spawn_download(app: AppHandle, job: Job, control: Arc<Control>) {
                 }
             }
         });
+        save_history(&app);
         if !leftovers.is_empty() {
             let dir = state.settings.lock().unwrap().download_dir.clone();
             downloader::remove_partial_files(&leftovers, &dir);
@@ -537,6 +627,7 @@ fn halt_job(app: &AppHandle, id: u64, halt: Halt) {
             let job = job.clone();
             drop(jobs);
             let _ = app.emit("job-updated", &job);
+            save_history(app);
             let dir = state.settings.lock().unwrap().download_dir.clone();
             std::thread::spawn(move || downloader::remove_partial_files(&leftovers, &dir));
         }
@@ -664,19 +755,24 @@ fn stop_download(app: AppHandle, id: u64) {
 }
 
 #[tauri::command]
-fn remove_job(state: State<AppState>, id: u64) {
+fn remove_job(app: AppHandle, state: State<AppState>, id: u64) {
     state
         .jobs
         .lock()
         .unwrap()
         .retain(|j| j.id != id || j.status.in_progress());
+    save_history(&app);
 }
 
 #[tauri::command]
-fn clear_finished(state: State<AppState>) -> Vec<Job> {
-    let mut jobs = state.jobs.lock().unwrap();
-    jobs.retain(|j| j.status.in_progress());
-    jobs.clone()
+fn clear_finished(app: AppHandle, state: State<AppState>) -> Vec<Job> {
+    let remaining = {
+        let mut jobs = state.jobs.lock().unwrap();
+        jobs.retain(|j| j.status.in_progress());
+        jobs.clone()
+    };
+    save_history(&app);
+    remaining
 }
 
 #[tauri::command]
@@ -730,6 +826,9 @@ async fn update_ytdlp(app: AppHandle) -> Result<String, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be registered first. Launching ClipDrop again (Start menu, shortcut) brings up the
+        // running copy instead of starting a second one with its own list and tray icon.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| show_main(app)))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
@@ -738,11 +837,18 @@ pub fn run() {
             let handle = app.handle().clone();
             let mica = apply_backdrop(app);
             eprintln!("[clipdrop] mica backdrop applied: {mica}");
+            let mut jobs: Vec<Job> = history::load::<StoredJob>(&handle)
+                .into_iter()
+                .filter_map(StoredJob::restore)
+                .collect();
+            jobs.truncate(MAX_JOBS);
+            let next_id = jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
             app.manage(AppState {
                 settings: Mutex::new(Settings::load(&handle)),
-                jobs: Mutex::new(Vec::new()),
+                jobs: Mutex::new(jobs),
+                history_io: Mutex::new(()),
                 controls: Mutex::new(HashMap::new()),
-                next_id: AtomicU64::new(1),
+                next_id: AtomicU64::new(next_id),
                 ytdlp: Mutex::new(None),
                 ffmpeg: ToolSlot::default(),
                 deno: ToolSlot::default(),
@@ -815,10 +921,10 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|_app, event| {
+        .run(|app, event| {
             // Covers every way out (window close, tray Quit, update restart): don't leave yt-dlp running hidden.
             if let tauri::RunEvent::Exit = event {
-                stop_downloads_for_exit();
+                stop_downloads_for_exit(app);
             }
         });
 }
@@ -826,9 +932,12 @@ pub fn run() {
 /// Set once the app is exiting, so downloads it stops aren't reported as failures.
 static QUITTING: AtomicBool = AtomicBool::new(false);
 
-/// Stops running downloads as the app exits (normal quit or an update install).
-pub(crate) fn stop_downloads_for_exit() {
-    QUITTING.store(true, Ordering::SeqCst);
+/// Stops running downloads as the app exits (normal quit or an update install), first saving the
+/// list with them marked paused so they resume next time. Safe to call more than once.
+pub(crate) fn stop_downloads_for_exit(app: &AppHandle) {
+    if !QUITTING.swap(true, Ordering::SeqCst) {
+        write_history(app);
+    }
     downloader::kill_all();
 }
 

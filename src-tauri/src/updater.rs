@@ -60,7 +60,7 @@ async fn check_inner(app: &AppHandle, manual: bool) -> Result<(), String> {
         // On Windows the installer path ends in process::exit, skipping RunEvent::Exit, so stop
         // running downloads here. Replacing the hook drops the plugin's default, so keep its cleanup.
         .on_before_exit(move || {
-            crate::stop_downloads_for_exit();
+            crate::stop_downloads_for_exit(&exiting);
             exiting.cleanup_before_exit();
         })
         .build()
