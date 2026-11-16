@@ -17,7 +17,16 @@ const FFMPEG_EXE_NAME: &str = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" 
 
 const MAX_CHECKSUM_BYTES: u64 = 128 * 1024;
 const MAX_BINARY_BYTES: u64 = 100 * 1024 * 1024;
-const ALLOWED_MEDIA_EXTENSIONS: &[&str] = &["mp4", "webm", "mkv", "mov", "m4a"];
+const ALLOWED_MEDIA_EXTENSIONS: &[&str] = &["mp4", "webm", "mkv", "mov", "m4a", "mp3"];
+/// Largest tool zip accepted (the ffmpeg build is ~200 MB, Deno ~45 MB); leaves headroom for growth.
+const MAX_TOOL_ZIP_BYTES: u64 = 400 * 1024 * 1024;
+/// Upper bound for each binary extracted from a tool zip.
+const MAX_TOOL_EXE_BYTES: u64 = 300 * 1024 * 1024;
+const FFMPEG_RELEASE: &str = "https://github.com/yt-dlp/FFmpeg-Builds/releases/download/latest";
+const FFMPEG_WIN64_ASSET: &str = "ffmpeg-master-latest-win64-gpl.zip";
+const DENO_EXE_NAME: &str = if cfg!(windows) { "deno.exe" } else { "deno" };
+const DENO_RELEASE: &str = "https://github.com/denoland/deno/releases/latest/download";
+const DENO_WIN64_ASSET: &str = "deno-x86_64-pc-windows-msvc.zip";
 
 fn release_asset() -> &'static str {
     if cfg!(windows) {
@@ -73,21 +82,212 @@ fn find_in_path(exe_name: &str) -> Option<PathBuf> {
     None
 }
 
-fn ffmpeg_path() -> Option<&'static Path> {
-    static FFMPEG: OnceLock<Option<PathBuf>> = OnceLock::new();
-    FFMPEG
+/// An ffmpeg already on this machine: the app-managed copy, else one on `PATH` that runs.
+pub fn find_ffmpeg(bin_dir: &Path) -> Option<PathBuf> {
+    static SYSTEM: OnceLock<Option<PathBuf>> = OnceLock::new();
+    find_tool(bin_dir, FFMPEG_EXE_NAME, "-version", &SYSTEM)
+}
+
+/// A Deno already on this machine (app-managed copy, else `PATH`). yt-dlp runs YouTube's player
+/// JavaScript in it; Deno is yt-dlp's default runtime and runs that code without file or network access.
+pub fn find_deno(bin_dir: &Path) -> Option<PathBuf> {
+    static SYSTEM: OnceLock<Option<PathBuf>> = OnceLock::new();
+    find_tool(bin_dir, DENO_EXE_NAME, "--version", &SYSTEM)
+}
+
+fn find_tool(
+    bin_dir: &Path,
+    exe: &str,
+    version_arg: &str,
+    system: &'static OnceLock<Option<PathBuf>>,
+) -> Option<PathBuf> {
+    let managed = bin_dir.join(exe);
+    if managed.is_file() {
+        return Some(managed);
+    }
+    system
         .get_or_init(|| {
-            let candidate = find_in_path(FFMPEG_EXE_NAME)?;
-            runs(&candidate, "-version").then_some(candidate)
+            let candidate = find_in_path(exe)?;
+            runs(&candidate, version_arg).then_some(candidate)
         })
-        .as_deref()
+        .clone()
+}
+
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(20))
+        .timeout_read(Duration::from_secs(120))
+        .build()
+}
+
+/// Parses a checksum file into the lowercase hex SHA-256 for the named asset.
+type ChecksumParser = fn(&str, &str) -> Option<String>;
+
+fn fetch_checksum(agent: &ureq::Agent, sums_url: &str, asset: &str, parse: ChecksumParser) -> Result<String, String> {
+    let resp = agent
+        .get(sums_url)
+        .call()
+        .map_err(|e| format!("failed to fetch checksums: {e}"))?;
+    let mut text = String::new();
+    resp.into_reader()
+        .take(MAX_CHECKSUM_BYTES)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("failed to read checksums: {e}"))?;
+    parse(&text, asset).ok_or_else(|| format!("SHA-256 checksum for {asset} not found"))
+}
+
+/// Parses PowerShell `Get-FileHash` output (`Hash : <hex>` plus `Path : ...\<asset>`), the
+/// format Deno publishes per asset. The `Path` line must name `asset`, binding the hash to it.
+fn parse_get_filehash(text: &str, asset: &str) -> Option<String> {
+    let field = |key: &str| {
+        text.lines().find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            (k.trim() == key).then(|| v.trim())
+        })
+    };
+    let file_name = field("Path")?.rsplit(['\\', '/']).next()?;
+    if file_name != asset {
+        return None;
+    }
+    let hash = field("Hash")?;
+    (hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit())).then(|| hash.to_ascii_lowercase())
+}
+
+/// Streams `url` into `dest`, enforcing `max_bytes`, and returns the file's SHA-256 (lowercase hex).
+fn download_hashed(agent: &ureq::Agent, url: &str, dest: &Path, max_bytes: u64) -> Result<String, String> {
+    let resp = agent.get(url).call().map_err(|e| format!("download failed: {e}"))?;
+    let mut file = std::fs::File::create(dest).map_err(|e| e.to_string())?;
+    let mut reader = resp.into_reader().take(max_bytes + 1);
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    let mut total: u64 = 0;
+    loop {
+        let n = reader.read(&mut buf).map_err(|e| format!("download failed: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        if total > max_bytes {
+            drop(file);
+            let _ = std::fs::remove_file(dest);
+            return Err("download exceeded the maximum allowed size".into());
+        }
+        hasher.update(&buf[..n]);
+        file.write_all(&buf[..n]).map_err(|e| format!("write failed: {e}"))?;
+    }
+    file.flush().map_err(|e| e.to_string())?;
+    Ok(hex_lower(&hasher.finalize()))
+}
+
+/// Downloads the yt-dlp project's Windows ffmpeg build, verifies its SHA-256, and extracts
+/// `ffmpeg` and `ffprobe` into `bin_dir`. Other platforms must provide ffmpeg on `PATH`.
+pub fn install_ffmpeg(bin_dir: &Path) -> Result<PathBuf, String> {
+    install_zip_tool(&ZipTool {
+        name: "ffmpeg",
+        sums_url: &format!("{FFMPEG_RELEASE}/checksums.sha256"),
+        parse_checksum: parse_sha256sum,
+        zip_url: &format!("{FFMPEG_RELEASE}/{FFMPEG_WIN64_ASSET}"),
+        asset: FFMPEG_WIN64_ASSET,
+        // ffprobe first: the main exe's presence is what marks the install as complete.
+        entries: &["bin/ffprobe.exe", "bin/ffmpeg.exe"],
+        version_arg: "-version",
+        bin_dir,
+    })
+}
+
+/// Downloads Deno's official Windows build, verifies its SHA-256, and extracts `deno.exe` into `bin_dir`.
+pub fn install_deno(bin_dir: &Path) -> Result<PathBuf, String> {
+    install_zip_tool(&ZipTool {
+        name: "Deno",
+        sums_url: &format!("{DENO_RELEASE}/{DENO_WIN64_ASSET}.sha256sum"),
+        parse_checksum: parse_get_filehash,
+        zip_url: &format!("{DENO_RELEASE}/{DENO_WIN64_ASSET}"),
+        asset: DENO_WIN64_ASSET,
+        entries: &["deno.exe"],
+        version_arg: "--version",
+        bin_dir,
+    })
+}
+
+/// A command-line tool shipped as a zip with a published SHA-256.
+struct ZipTool<'a> {
+    name: &'a str,
+    sums_url: &'a str,
+    parse_checksum: ChecksumParser,
+    zip_url: &'a str,
+    asset: &'a str,
+    /// Archive paths (matched as a whole name or a `/`-separated suffix) of the exes to extract.
+    /// The last one is the main exe, returned and checked with `version_arg`.
+    entries: &'a [&'a str],
+    version_arg: &'a str,
+    bin_dir: &'a Path,
+}
+
+/// Downloads a tool's zip, verifies it against the published SHA-256, and extracts its exes into
+/// `bin_dir`. Only Windows x64 builds are fetched; elsewhere the tool must be on `PATH`.
+fn install_zip_tool(tool: &ZipTool) -> Result<PathBuf, String> {
+    let name = tool.name;
+    if !(cfg!(windows) && cfg!(target_arch = "x86_64")) {
+        return Err(format!("install {name} and make sure it is on your PATH"));
+    }
+    let bin_dir = tool.bin_dir;
+    std::fs::create_dir_all(bin_dir).map_err(|e| format!("cannot create {}: {e}", bin_dir.display()))?;
+    let agent = http_agent();
+    let expected = fetch_checksum(&agent, tool.sums_url, tool.asset, tool.parse_checksum)?;
+
+    let zip_path = bin_dir.join(format!("{}.part", tool.asset));
+    let actual = download_hashed(&agent, tool.zip_url, &zip_path, MAX_TOOL_ZIP_BYTES)?;
+    if actual != expected {
+        let _ = std::fs::remove_file(&zip_path);
+        return Err(format!("{name} SHA-256 verification failed (expected {expected}, got {actual})"));
+    }
+    let result = extract_zip_tool(tool, &zip_path);
+    let _ = std::fs::remove_file(&zip_path);
+    result
+}
+
+fn extract_zip_tool(tool: &ZipTool, zip_path: &Path) -> Result<PathBuf, String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("bad {} archive: {e}", tool.name))?;
+    let mut main_exe = None;
+    for entry_path in tool.entries {
+        // Entries are matched by name and written to fixed file names, so archive paths can't escape bin_dir.
+        let exe = entry_path.rsplit('/').next().unwrap_or(entry_path);
+        let suffix = format!("/{entry_path}");
+        let name = archive
+            .file_names()
+            .filter_map(Result::ok)
+            .find(|n| n == entry_path || n.ends_with(&suffix))
+            .map(|n| n.into_owned())
+            .ok_or_else(|| format!("{exe} missing from {} archive", tool.name))?;
+        let mut entry = archive.by_name(&name).map_err(|e| e.to_string())?;
+        let tmp = tool.bin_dir.join(format!("{exe}.part"));
+        let mut out = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+        let copied = std::io::copy(&mut (&mut entry).take(MAX_TOOL_EXE_BYTES + 1), &mut out)
+            .map_err(|e| format!("failed to extract {exe}: {e}"))?;
+        drop(out);
+        if copied > MAX_TOOL_EXE_BYTES {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!("{exe} in archive is unexpectedly large"));
+        }
+        let dest = tool.bin_dir.join(exe);
+        std::fs::rename(&tmp, &dest).map_err(|e| e.to_string())?;
+        main_exe = Some(dest);
+    }
+    let main_exe = main_exe.ok_or("no files to extract")?;
+    if !runs(&main_exe, tool.version_arg) {
+        let _ = std::fs::remove_file(&main_exe);
+        return Err(format!("the downloaded {} does not run", tool.name));
+    }
+    Ok(main_exe)
 }
 
 fn parse_sha256sum(sums_text: &str, asset_name: &str) -> Option<String> {
     for line in sums_text.lines() {
         let mut parts = line.split_whitespace();
-        let hash = parts.next()?;
-        let name = parts.next()?.trim_start_matches('*');
+        // Skip blank or malformed lines rather than giving up on the whole file.
+        let (Some(hash), Some(name)) = (parts.next(), parts.next()) else { continue };
+        let name = name.trim_start_matches('*');
         if name == asset_name && hash.len() == 64 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Some(hash.to_ascii_lowercase());
         }
@@ -124,58 +324,15 @@ pub fn install_managed(bin_dir: &Path) -> Result<PathBuf, String> {
     let managed = bin_dir.join(EXE_NAME);
     std::fs::create_dir_all(bin_dir).map_err(|e| format!("cannot create {}: {e}", bin_dir.display()))?;
 
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(20))
-        .timeout_read(Duration::from_secs(120))
-        .build();
-
+    let agent = http_agent();
     let asset = release_asset();
-    let sums_url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/SHA2-256SUMS";
-    let sums_resp = agent
-        .get(sums_url)
-        .call()
-        .map_err(|e| format!("failed to fetch yt-dlp checksums: {e}"))?;
-    let mut sums_text = String::new();
-    sums_resp
-        .into_reader()
-        .take(MAX_CHECKSUM_BYTES)
-        .read_to_string(&mut sums_text)
-        .map_err(|e| format!("failed to read yt-dlp checksums: {e}"))?;
-    let expected_sha256 = parse_sha256sum(&sums_text, asset)
-        .ok_or_else(|| format!("SHA-256 checksum for {asset} not found in release SHA2-256SUMS"))?;
-
-    let url = format!("https://github.com/yt-dlp/yt-dlp/releases/latest/download/{asset}");
-    let resp = agent
-        .get(&url)
-        .call()
-        .map_err(|e| format!("failed to download yt-dlp: {e}"))?;
+    let release = "https://github.com/yt-dlp/yt-dlp/releases/latest/download";
+    let expected_sha256 =
+        fetch_checksum(&agent, &format!("{release}/SHA2-256SUMS"), asset, parse_sha256sum).map_err(|e| format!("yt-dlp: {e}"))?;
 
     let tmp = bin_dir.join(format!("{EXE_NAME}.part"));
-    let actual_sha256 = {
-        let mut file = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
-        let mut reader = resp.into_reader().take(MAX_BINARY_BYTES + 1);
-        let mut hasher = Sha256::new();
-        let mut buf = [0u8; 32 * 1024];
-        let mut total: u64 = 0;
-        loop {
-            let n = reader
-                .read(&mut buf)
-                .map_err(|e| format!("failed to download yt-dlp: {e}"))?;
-            if n == 0 {
-                break;
-            }
-            total += n as u64;
-            if total > MAX_BINARY_BYTES {
-                let _ = std::fs::remove_file(&tmp);
-                return Err("yt-dlp download exceeded maximum allowed size".into());
-            }
-            hasher.update(&buf[..n]);
-            file.write_all(&buf[..n])
-                .map_err(|e| format!("failed to write yt-dlp: {e}"))?;
-        }
-        file.flush().map_err(|e| e.to_string())?;
-        hex_lower(&hasher.finalize())
-    };
+    let actual_sha256 = download_hashed(&agent, &format!("{release}/{asset}"), &tmp, MAX_BINARY_BYTES)
+        .map_err(|e| format!("yt-dlp: {e}"))?;
 
     if actual_sha256 != expected_sha256 {
         let _ = std::fs::remove_file(&tmp);
@@ -216,6 +373,8 @@ pub fn self_update(ytdlp: &Path, bin_dir: &Path) -> Result<(PathBuf, String), St
 pub enum Event {
     Title(String),
     Progress { downloaded: f64, total: Option<f64>, speed: Option<f64> },
+    /// The download finished and ffmpeg is converting it to MP3.
+    Converting,
     File(String),
 }
 
@@ -266,6 +425,29 @@ pub fn validate_downloaded_file(file: &str, download_dir: &str) -> Result<PathBu
     Ok(canon_file)
 }
 
+/// What to save from a link: chosen by which box the link was pasted into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Format {
+    /// The video, as an mp4.
+    Mp4,
+    /// The audio, converted to mp3 with tags and cover art.
+    Mp3,
+}
+
+impl Format {
+    /// Whether this download can't be done properly without ffmpeg (so it is installed if missing).
+    /// MP3 always converts; YouTube serves good video only as separate streams that ffmpeg merges.
+    pub fn needs_ffmpeg(self, platform: Platform) -> bool {
+        self == Format::Mp3 || platform == Platform::Youtube
+    }
+}
+
+/// Whether yt-dlp needs a JavaScript runtime (Deno) for this site.
+pub fn needs_js_runtime(platform: Platform) -> bool {
+    platform == Platform::Youtube
+}
+
 enum PipeLine {
     Stdout(String),
     Stderr(String),
@@ -276,26 +458,119 @@ pub fn download(
     ytdlp: &Path,
     url: &str,
     platform: Platform,
+    format: Format,
     settings: &Settings,
+    ffmpeg: Option<&Path>,
+    deno: Option<&Path>,
     mut on_event: impl FnMut(Event),
 ) -> Result<Vec<String>, String> {
     let mut settings = settings.clone();
     settings.validate()?;
+    if format.needs_ffmpeg(platform) && ffmpeg.is_none() {
+        return Err(match format {
+            Format::Mp3 => "Converting to MP3 needs ffmpeg, which isn't available.".into(),
+            Format::Mp4 => format!("{} videos need ffmpeg, which isn't available.", platform.label()),
+        });
+    }
 
     std::fs::create_dir_all(&settings.download_dir)
         .map_err(|e| format!("cannot create download folder: {e}"))?;
 
     let mut cmd = command(ytdlp);
-    cmd.args(build_args(platform, &settings, ffmpeg_path()));
+    cmd.args(build_args(platform, format, &settings, ffmpeg, deno));
     cmd.arg("--").arg(url).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = cmd.spawn().map_err(|e| format!("failed to start yt-dlp: {e}"))?;
-    read_output(&mut child, &settings.download_dir, &mut on_event)
+    contain(&child);
+    // The match filter skips live streams silently (as do some other limits), so hint at the likely cause.
+    let nothing_found = match format {
+        Format::Mp3 => "Nothing was saved. If this is a live stream, try again once it has ended.",
+        Format::Mp4 => "No video was found in this post. If it's a live stream, try again once it has ended.",
+    };
+    read_output(&mut child, &settings.download_dir, nothing_found, &mut on_event)
+}
+
+/// Puts a yt-dlp process in a Windows job object that kills it, and everything it starts (ffmpeg,
+/// Deno), as soon as ClipDrop exits for any reason (quit, update install, crash), so nothing keeps
+/// running hidden. Assigned right after spawn: yt-dlp's launcher unpacks itself before starting
+/// children, and children started afterwards inherit the job.
+#[cfg(windows)]
+fn contain(child: &std::process::Child) {
+    use std::os::windows::io::AsRawHandle;
+    let Some(job) = job::handle() else { return };
+    // SAFETY: both handles are valid; the child's handle is owned by `child`, which outlives the call.
+    let ok = unsafe { windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(job, child.as_raw_handle()) };
+    if ok == 0 {
+        eprintln!("[clipdrop] couldn't add yt-dlp to the job object: {}", std::io::Error::last_os_error());
+    }
+}
+
+#[cfg(not(windows))]
+fn contain(_child: &std::process::Child) {}
+
+/// Stops every running download now (yt-dlp and its children). Called just before the app exits,
+/// e.g. so an update installer doesn't find ffmpeg still holding files open.
+pub fn kill_all() {
+    #[cfg(windows)]
+    if let Some(job) = job::handle() {
+        // SAFETY: `job` is a valid job object handle for the life of the process.
+        unsafe { windows_sys::Win32::System::JobObjects::TerminateJobObject(job, 1) };
+    }
+}
+
+#[cfg(windows)]
+mod job {
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::JobObjects::{
+        CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JobObjectExtendedLimitInformation, SetInformationJobObject,
+    };
+
+    /// The process-wide job. Its handle is never closed, so Windows closes it when ClipDrop exits,
+    /// which (with KILL_ON_JOB_CLOSE) terminates every process still in the job.
+    pub fn handle() -> Option<HANDLE> {
+        static JOB: OnceLock<Option<usize>> = OnceLock::new();
+        JOB.get_or_init(create).map(|h| h as HANDLE)
+    }
+
+    fn create() -> Option<usize> {
+        // SAFETY: plain Win32 calls with valid pointers; the info struct is zero-initialised as documented.
+        unsafe {
+            let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+            if job.is_null() {
+                eprintln!("[clipdrop] couldn't create job object: {}", std::io::Error::last_os_error());
+                return None;
+            }
+            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            let ok = SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&raw const info).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                eprintln!("[clipdrop] couldn't configure job object: {}", std::io::Error::last_os_error());
+                return None;
+            }
+            Some(job as usize)
+        }
+    }
 }
 
 /// The yt-dlp options (everything before `-- URL`) used for a download.
-fn build_args(platform: Platform, settings: &Settings, ffmpeg: Option<&Path>) -> Vec<std::ffi::OsString> {
+fn build_args(
+    platform: Platform,
+    format: Format,
+    settings: &Settings,
+    ffmpeg: Option<&Path>,
+    deno: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
     let mut cmd = ArgList::default();
     cmd.args([
+        // Never read yt-dlp config files: one dropped into the download folder (e.g. a drive-by
+        // download of yt-dlp.conf) would be applied, and could add --exec or lift the extractor allowlist.
+        "--ignore-config",
         "--newline",
         "--progress",
         "--no-simulate",
@@ -309,24 +584,63 @@ fn build_args(platform: Platform, settings: &Settings, ffmpeg: Option<&Path>) ->
         "30",
         "--use-extractors",
         platform.allowed_extractors(),
+        // A live stream has no end, so it would record for hours (and has no audio-only format).
+        "--match-filter",
+        "!is_live",
     ])
-    .args(["-P", &format!("home:{}", settings.download_dir)])
-    .args([
-        "-o",
-        &format!("{}_%(uploader_id,uploader|unknown).40s_%(id)s.%(ext)s", platform.slug()),
-    ])
+    .args(["-P", &format!("home:{}", settings.download_dir)]);
+    if format == Format::Mp3 {
+        // Songs are found by name, so audio files are named after the title.
+        cmd.args(["-o", "%(title).90s [%(id)s].%(ext)s"]);
+    } else {
+        cmd.args([
+            "-o",
+            &format!("{}_%(uploader_id,uploader|unknown).40s_%(id)s.%(ext)s", platform.slug()),
+        ]);
+    }
+    cmd
     // Use JSON formatting (%()j) so embedded newlines in post titles are escaped and cannot spoof CDFILE| lines.
     .args(["--print", "before_dl:CDTITLE|%(title.0:120)j"])
     .args(["--print", "after_move:CDFILE|%(filepath)j"])
     .args([
         "--progress-template",
         "download:CDPROG|%(progress.downloaded_bytes)s|%(progress.total_bytes,progress.total_bytes_estimate)s|%(progress.speed)s",
+        "--progress-template",
+        "postprocess:CDPP|%(progress.status)s|%(progress.postprocessor)s",
     ]);
 
-    if let Some(ffmpeg) = ffmpeg {
-        cmd.arg("--ffmpeg-location")
-            .arg(ffmpeg)
-            .args(["-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b", "--merge-output-format", "mp4"]);
+    if let Some(deno) = deno.filter(|_| needs_js_runtime(platform)) {
+        let mut runtime = std::ffi::OsString::from("deno:");
+        runtime.push(deno);
+        cmd.arg("--js-runtimes").arg(runtime);
+    }
+
+    if format == Format::Mp3 {
+        if let Some(ffmpeg) = ffmpeg {
+            cmd.arg("--ffmpeg-location").arg(ffmpeg);
+        }
+        cmd.args([
+            "-f",
+            "ba/b",
+            "--extract-audio",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "0",
+            "--embed-metadata",
+            "--embed-thumbnail",
+            "--convert-thumbnails",
+            "jpg",
+        ]);
+    } else if let Some(ffmpeg) = ffmpeg {
+        // Prefer H.264 (plays everywhere, unlike AV1/VP9) and cap at 1080p so YouTube videos stay
+        // well under --max-filesize; X, Instagram and TikTok rarely go above that anyway.
+        cmd.arg("--ffmpeg-location").arg(ffmpeg).args([
+            "-f",
+            "bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b",
+            "--merge-output-format",
+            "mp4",
+        ]);
     } else {
         // Without ffmpeg we can't merge separate audio/video streams, so stick to single-file formats.
         cmd.args(["-f", "b[ext=mp4]/b"]);
@@ -355,9 +669,29 @@ impl ArgList {
     }
 }
 
+/// Handles a download (`CDPROG|`) or post-processing (`CDPP|`) progress line. Returns whether it was one.
+fn progress_event(line: &str, on_event: &mut impl FnMut(Event)) -> bool {
+    if let Some(rest) = line.strip_prefix("CDPROG|") {
+        let mut parts = rest.split('|');
+        let downloaded = parts.next().and_then(parse_num).unwrap_or(0.0);
+        let total = parts.next().and_then(parse_num);
+        let speed = parts.next().and_then(parse_num);
+        on_event(Event::Progress { downloaded, total, speed });
+        true
+    } else if let Some(rest) = line.strip_prefix("CDPP|") {
+        if rest == "started|ExtractAudio" {
+            on_event(Event::Converting);
+        }
+        true
+    } else {
+        false
+    }
+}
+
 fn read_output(
     child: &mut std::process::Child,
     download_dir: &str,
+    nothing_found: &str,
     on_event: &mut impl FnMut(Event),
 ) -> Result<Vec<String>, String> {
     // Read stdout and stderr on separate threads while tagging their source stream.
@@ -392,12 +726,7 @@ fn read_output(
     for item in rx {
         match item {
             PipeLine::Stdout(line) => {
-                if let Some(rest) = line.strip_prefix("CDPROG|") {
-                    let mut parts = rest.split('|');
-                    let downloaded = parts.next().and_then(parse_num).unwrap_or(0.0);
-                    let total = parts.next().and_then(parse_num);
-                    let speed = parts.next().and_then(parse_num);
-                    on_event(Event::Progress { downloaded, total, speed });
+                if progress_event(&line, on_event) {
                 } else if let Some(raw_title) = line.strip_prefix("CDTITLE|") {
                     if let Some(title) = decode_printed_value(raw_title) {
                         on_event(Event::Title(title));
@@ -419,13 +748,9 @@ fn read_output(
             PipeLine::Stderr(line) => {
                 if let Some(err) = line.strip_prefix("ERROR: ") {
                     errors.push(err.to_string());
-                } else if let Some(rest) = line.strip_prefix("CDPROG|") {
-                    // yt-dlp may emit progress lines to stderr depending on stream buffering
-                    let mut parts = rest.split('|');
-                    let downloaded = parts.next().and_then(parse_num).unwrap_or(0.0);
-                    let total = parts.next().and_then(parse_num);
-                    let speed = parts.next().and_then(parse_num);
-                    on_event(Event::Progress { downloaded, total, speed });
+                } else {
+                    // In quiet mode (implied by --print) yt-dlp writes progress to stderr.
+                    progress_event(&line, on_event);
                 }
             }
         }
@@ -444,7 +769,7 @@ fn read_output(
     if let Some(err) = errors.pop() {
         Err(err)
     } else if status.success() {
-        Err("yt-dlp finished but no video was found in this post".into())
+        Err(nothing_found.into())
     } else {
         Err(format!("yt-dlp exited with {status}"))
     }
@@ -465,6 +790,9 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
             Some("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210")
         );
         assert!(parse_sha256sum(sample, "other").is_none());
+        // A blank or malformed line earlier in the file doesn't stop the search.
+        let messy = format!("\n\nnot-a-checksum-line\n{sample}");
+        assert!(parse_sha256sum(&messy, "yt-dlp.exe").is_some());
     }
 
     #[test]
@@ -522,7 +850,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         let mut settings = test_settings();
         settings.cookies_browser.clear(); // don't touch the developer's browser profile
         let out = command(ytdlp)
-            .args(build_args(platform, &settings, None))
+            .args(build_args(platform, Format::Mp4, &settings, None, None))
             .args(["--simulate", "--ignore-config", "--proxy", "http://127.0.0.1:9", "--retries", "0"])
             .arg("--")
             .arg(url)
@@ -539,17 +867,21 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         };
 
         // Option parsing happens before `--version` prints, so unknown flags fail here (offline).
-        for platform in [Platform::Twitter, Platform::Instagram, Platform::Tiktok] {
-            let out = command(&ytdlp)
-                .args(build_args(platform, &test_settings(), Some(&ytdlp)))
-                .arg("--version")
-                .output()
-                .expect("run yt-dlp");
-            assert!(
-                out.status.success(),
-                "yt-dlp rejected options for {platform:?}: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+        for platform in [Platform::Twitter, Platform::Instagram, Platform::Tiktok, Platform::Youtube] {
+            for format in [Format::Mp4, Format::Mp3] {
+                for ffmpeg in [Some(ytdlp.as_path()), None] {
+                    let out = command(&ytdlp)
+                        .args(build_args(platform, format, &test_settings(), ffmpeg, Some(&ytdlp)))
+                        .arg("--version")
+                        .output()
+                        .expect("run yt-dlp");
+                    assert!(
+                        out.status.success(),
+                        "yt-dlp rejected options for {platform:?} {format:?}: {}",
+                        String::from_utf8_lossy(&out.stderr)
+                    );
+                }
+            }
         }
 
         for (platform, url) in [
@@ -558,6 +890,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
             (Platform::Tiktok, "https://www.tiktok.com/@user/video/123"),
             (Platform::Tiktok, "https://vm.tiktok.com/ZMabc/"),
             (Platform::Tiktok, "https://www.tiktok.com/t/ZTabc/"),
+            (Platform::Youtube, "https://www.youtube.com/watch?v=dQw4w9WgXcQ"),
         ] {
             let out = run_real(&ytdlp, platform, url);
             assert!(!out.contains("No suitable extractor"), "{url} not matched by allowlist:\n{out}");
@@ -566,5 +899,152 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         // The allowlist must block pivoting to other sites.
         let out = run_real(&ytdlp, Platform::Twitter, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
         assert!(out.contains("No suitable extractor"), "allowlist let a YouTube URL through:\n{out}");
+        let out = run_real(&ytdlp, Platform::Youtube, "https://x.com/user/status/1");
+        assert!(out.contains("No suitable extractor"), "YouTube allowlist let an X URL through:\n{out}");
+    }
+
+    #[test]
+    fn progress_lines_drive_events() {
+        let mut events = Vec::new();
+        let mut on_event = |e: Event| {
+            events.push(match e {
+                Event::Progress { downloaded, .. } => format!("progress {downloaded}"),
+                Event::Converting => "converting".into(),
+                Event::Title(_) | Event::File(_) => "other".into(),
+            })
+        };
+        assert!(progress_event("CDPROG|512|1024|10", &mut on_event));
+        assert!(progress_event("CDPP|started|ExtractAudio", &mut on_event));
+        // Other post-processor lines are consumed without an event.
+        assert!(progress_event("CDPP|finished|ExtractAudio", &mut on_event));
+        assert!(progress_event("CDPP|started|MoveFiles", &mut on_event));
+        assert!(!progress_event("[download] 50%", &mut on_event));
+        assert_eq!(events, ["progress 512", "converting"]);
+    }
+
+    #[test]
+    fn format_decides_the_yt_dlp_options() {
+        let tool = Path::new(r"C:\tools\x.exe");
+        let args_for = |platform, format, ffmpeg| -> Vec<String> {
+            build_args(platform, format, &test_settings(), ffmpeg, Some(tool))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+
+        // MP3 from YouTube: audio extraction, title naming, Deno, live streams skipped.
+        let args = args_for(Platform::Youtube, Format::Mp3, Some(tool));
+        let has = |pair: [&str; 2]| args.windows(2).any(|w| w[0] == pair[0] && w[1] == pair[1]);
+        assert_eq!(args[0], "--ignore-config");
+        assert!(has(["--use-extractors", "youtube"]));
+        assert!(has(["--audio-format", "mp3"]));
+        assert!(has(["--match-filter", "!is_live"]));
+        assert!(has(["--ffmpeg-location", r"C:\tools\x.exe"]));
+        assert!(has(["--js-runtimes", r"deno:C:\tools\x.exe"]));
+        assert!(has(["-o", "%(title).90s [%(id)s].%(ext)s"]));
+
+        // MP3 from TikTok: audio extraction, but no JS runtime (only YouTube needs it).
+        let tiktok = args_for(Platform::Tiktok, Format::Mp3, Some(tool));
+        assert!(tiktok.iter().any(|a| a == "--extract-audio"));
+        assert!(!tiktok.iter().any(|a| a == "--js-runtimes"));
+
+        // MP4 from YouTube: merged video with Deno, no audio extraction.
+        let yt_video = args_for(Platform::Youtube, Format::Mp4, Some(tool));
+        assert!(yt_video.iter().any(|a| a == "--js-runtimes"));
+        assert!(yt_video.windows(2).any(|w| w[0] == "--merge-output-format" && w[1] == "mp4"));
+        assert!(!yt_video.iter().any(|a| a == "--extract-audio"));
+
+        // MP4 from X without ffmpeg: single-file formats; every job keeps the safety options.
+        let video = args_for(Platform::Twitter, Format::Mp4, None);
+        assert_eq!(video[0], "--ignore-config");
+        assert!(video.windows(2).any(|w| w[0] == "-f" && w[1] == "b[ext=mp4]/b"));
+        assert!(video.windows(2).any(|w| w[0] == "--match-filter" && w[1] == "!is_live"));
+        assert!(!video.iter().any(|a| a == "--extract-audio" || a == "--js-runtimes"));
+    }
+
+    /// The job object must take down a contained process *and* the processes it starts.
+    #[cfg(windows)]
+    #[test]
+    fn kill_all_stops_contained_process_tree() {
+        let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let ping = system32.join("PING.EXE").to_string_lossy().into_owned();
+        // cmd.exe starts a ping child, like yt-dlp starting ffmpeg.
+        let mut child = command(system32.join("cmd.exe"))
+            .args(["/C", &ping, "-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        contain(&child);
+        std::thread::sleep(Duration::from_millis(500));
+        kill_all();
+        let started = std::time::Instant::now();
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(started.elapsed() < Duration::from_secs(5), "contained process survived kill_all");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[test]
+    fn parses_get_filehash_checksums() {
+        let deno = "\r\nAlgorithm : SHA256\r\nHash      : CBA84B26E0DF5AE7F74FC66B86A95B866872A86292EBD84FA1E959927EDD93BF\r\nPath      : C:\\a\\deno.zip\r\n";
+        assert_eq!(
+            parse_get_filehash(deno, "deno.zip").as_deref(),
+            Some("cba84b26e0df5ae7f74fc66b86a95b866872a86292ebd84fa1e959927edd93bf")
+        );
+        // The hash must belong to the asset named in the file.
+        assert!(parse_get_filehash(deno, "other.zip").is_none());
+        assert!(parse_get_filehash("Hash : not-a-hash\nPath : C:\\deno.zip", "deno.zip").is_none());
+        assert!(parse_get_filehash("Path : C:\\deno.zip", "deno.zip").is_none());
+    }
+
+    /// Network test: installs ffmpeg and Deno into `CLIPDROP_TEST_DIR` and saves a 19 s YouTube video as MP3 and MP4.
+    /// Run with `CLIPDROP_TEST_DIR=<dir> cargo test youtube_to_mp3 -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn youtube_to_mp3_end_to_end() {
+        let ytdlp = real_ytdlp().expect("no yt-dlp found (set CLIPDROP_YTDLP)");
+        let base = PathBuf::from(std::env::var_os("CLIPDROP_TEST_DIR").expect("set CLIPDROP_TEST_DIR"));
+        let bin_dir = base.join("bin");
+        let ffmpeg = find_ffmpeg(&bin_dir).map_or_else(|| install_ffmpeg(&bin_dir), Ok).expect("ffmpeg");
+        let deno = find_deno(&bin_dir).map_or_else(|| install_deno(&bin_dir), Ok).expect("deno");
+        let settings = Settings {
+            download_dir: base.join("out").to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let mut converting = false;
+        let files = download(
+            &ytdlp,
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            Platform::Youtube,
+            Format::Mp3,
+            &settings,
+            Some(&ffmpeg),
+            Some(&deno),
+            |e| converting |= matches!(e, Event::Converting),
+        )
+        .expect("download");
+        assert!(converting, "never reported the MP3 conversion step");
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with(".mp3"), "{files:?}");
+        println!("saved {}", files[0]);
+
+        // The same video from the MP4 box: merged into an mp4 (needs ffmpeg and Deno for YouTube).
+        let files = download(
+            &ytdlp,
+            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
+            Platform::Youtube,
+            Format::Mp4,
+            &settings,
+            Some(&ffmpeg),
+            Some(&deno),
+            |_| {},
+        )
+        .expect("mp4 download");
+        assert_eq!(files.len(), 1);
+        assert!(files[0].ends_with(".mp4"), "{files:?}");
+        println!("saved {}", files[0]);
     }
 }

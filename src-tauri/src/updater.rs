@@ -18,7 +18,7 @@ static CHECKING: AtomicBool = AtomicBool::new(false);
 /// Version the user chose "Later" for; background checks won't ask about it again this session.
 static DECLINED: Mutex<Option<String>> = Mutex::new(None);
 
-/// Checks shortly after launch, then periodically, since the app usually lives in the tray.
+/// Checks shortly after launch, then periodically while the app stays open.
 pub fn spawn_background_checks(app: AppHandle) {
     std::thread::spawn(move || {
         std::thread::sleep(FIRST_CHECK_DELAY);
@@ -54,8 +54,16 @@ async fn check(app: &AppHandle, manual: bool) {
 }
 
 async fn check_inner(app: &AppHandle, manual: bool) -> Result<(), String> {
+    let exiting = app.clone();
     let update = app
-        .updater()
+        .updater_builder()
+        // On Windows the installer path ends in process::exit, skipping RunEvent::Exit, so stop
+        // running downloads here. Replacing the hook drops the plugin's default, so keep its cleanup.
+        .on_before_exit(move || {
+            crate::stop_downloads_for_exit();
+            exiting.cleanup_before_exit();
+        })
+        .build()
         .map_err(|e| e.to_string())?
         .check()
         .await

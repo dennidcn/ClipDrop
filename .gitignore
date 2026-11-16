@@ -29,3 +29,4 @@ dist-ssr
 .impeccable/questions/
 .impeccable/build/
 .impeccable/config.local.json
+.impeccable/hook.cache.json

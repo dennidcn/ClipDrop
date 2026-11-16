@@ -10,28 +10,29 @@ web
 
 ## Users
 
-The author, using it casually for themselves. They're scrolling X, Instagram or TikTok, see a clip worth keeping, copy the link, and want it saved without thinking about it. The app spends most of its life in the system tray; the window is opened briefly to check that something landed, open the file, or change a setting.
+The author, using it casually for themselves. They're scrolling X, Instagram or TikTok, see a clip or song worth keeping, copy the link, paste it into ClipDrop, and want it saved without thinking about it. The window is opened briefly to paste a link, check that something landed, open the file, or change a setting.
 
 ## Product Purpose
 
-ClipDrop turns "copy link" into "video saved". It watches the clipboard and downloads X/Twitter, Instagram and TikTok videos to a folder on its own. Success means the user never opens a downloader website again and never has to babysit a download.
+ClipDrop turns "paste link" into "file saved". It saves posts from X/Twitter, Instagram, TikTok and YouTube to a folder, as video (MP4) or audio (MP3) depending on which of its two paste boxes the link goes in. Success means the user never opens a downloader website again and never has to babysit a download.
 
 ## Positioning
 
-There's no paste-and-click step. The clipboard is the input, and the app works quietly from the tray. Most competitors are websites or paste-a-link tools.
+A native desktop app instead of an ad-laden downloader website: paste a link and the file lands in a folder. Links are only ever taken from what the user pastes; ClipDrop does not read the clipboard on its own (removed 2026-11-16).
 
 ## Operating Context
 
-- Windows desktop, small window (about 440×640, minimum 360×420), often left in the tray.
+- Windows desktop, small window (about 440×640, minimum 360×420).
 - The window is glanced at, not worked in. Typical visits last a few seconds.
 - Files go to `Downloads\ClipDrop` by default. yt-dlp is installed and updated by the app.
 
 ## Capabilities and Constraints
 
 - Detects post links from X/Twitter (including fx/vx mirrors), Instagram (reel, p, tv) and TikTok (full and short links). Duplicate copies of the same post are ignored.
-- Job states: detected (auto-download off), downloading (with progress and speed), done (open or show in folder), error (retry).
-- Settings: watch clipboard on/off, auto-download, notifications, download folder, browser cookies for logged-in Instagram, update yt-dlp.
-- Closing the window hides it to the tray; quit from the tray menu.
+- Also detects YouTube links (watch, youtu.be, shorts, live, YouTube Music). Two paste boxes, Video (MP4) and Audio (MP3), each accept any supported site; the box decides the format, and the same post can be saved both ways. MP3s get title, artist and cover art. ffmpeg and Deno (yt-dlp's sandboxed JavaScript runtime for YouTube) are fetched once on first use if they aren't on `PATH`; nobody needs Node.js or anything else installed.
+- Job states: downloading (with progress and speed, then "converting" for MP3s), done (open or show in folder), error (retry). Pasted links start at once.
+- Settings: notifications, download folder, browser cookies for logged-in Instagram, update yt-dlp.
+- Closing the window quits the app (with a confirmation if downloads are running, which are then stopped).
 - Frontend is plain HTML/CSS/JS with no bundler. Fonts and assets must be served locally (CSP `default-src 'self'`).
 
 ## Brand Commitments
@@ -46,7 +47,7 @@ No users, metrics or testimonials. Personal tool.
 
 ## Product Principles
 
-1. Copying is the interface; the window is a receipt.
+1. Pasting a link is the whole interface; the rest of the window is a receipt.
 2. Never make the user wait or watch. Background-first, glanceable when opened.
 3. Failures explain themselves in plain words and offer one obvious fix.
 4. Lightweight in every sense: small binary, few controls, no account.

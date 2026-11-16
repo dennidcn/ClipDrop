@@ -1,4 +1,4 @@
-//! Detects supported video links in arbitrary text (e.g. clipboard contents)
+//! Detects supported video links in arbitrary pasted text
 //! and normalises them so the same post is only downloaded once.
 
 use regex::Regex;
@@ -11,6 +11,7 @@ pub enum Platform {
     Twitter,
     Instagram,
     Tiktok,
+    Youtube,
 }
 
 impl Platform {
@@ -19,6 +20,7 @@ impl Platform {
             Platform::Twitter => "X",
             Platform::Instagram => "Instagram",
             Platform::Tiktok => "TikTok",
+            Platform::Youtube => "YouTube",
         }
     }
 
@@ -27,6 +29,7 @@ impl Platform {
             Platform::Twitter => "x",
             Platform::Instagram => "instagram",
             Platform::Tiktok => "tiktok",
+            Platform::Youtube => "youtube",
         }
     }
 
@@ -37,13 +40,14 @@ impl Platform {
             Platform::Instagram => "instagram",
             // Names are regexes matched against yt-dlp extractor names; short links use `vm.tiktok`.
             Platform::Tiktok => r"tiktok,vm\.tiktok",
+            Platform::Youtube => "youtube",
         }
     }
 }
 
-/// Maximum bytes of input text scanned for links (protects against huge clipboard payloads).
+/// Maximum bytes of input text scanned for links (protects against huge pasted payloads).
 const MAX_EXTRACT_BYTES: usize = 32 * 1024;
-/// Maximum distinct links extracted from a single clipboard copy or paste action.
+/// Maximum distinct links extracted from a single paste.
 pub const MAX_LINKS_PER_EXTRACT: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -95,8 +99,34 @@ static PATTERNS: LazyLock<Vec<(Platform, Regex, Canonicalise)>> = LazyLock::new(
             Regex::new(r"(?i)https?://(?:www\.)?tiktok\.com/t/([a-z0-9_-]+)").unwrap(),
             |c| format!("https://www.tiktok.com/t/{}/", &c[1]),
         ),
+        // YouTube video IDs are exactly 11 characters; the trailing group stops longer IDs matching.
+        (
+            Platform::Youtube,
+            Regex::new(
+                r"(?i)https?://(?:www\.|m\.|music\.)?youtube\.com/watch\?(?:[^\s#]*?&)?v=([a-z0-9_-]{11})(?:[^a-z0-9_-]|$)",
+            )
+            .unwrap(),
+            youtube_canonical,
+        ),
+        (
+            Platform::Youtube,
+            Regex::new(
+                r"(?i)https?://(?:www\.|m\.)?youtube\.com/(?:shorts|live|embed)/([a-z0-9_-]{11})(?:[^a-z0-9_-]|$)",
+            )
+            .unwrap(),
+            youtube_canonical,
+        ),
+        (
+            Platform::Youtube,
+            Regex::new(r"(?i)https?://youtu\.be/([a-z0-9_-]{11})(?:[^a-z0-9_-]|$)").unwrap(),
+            youtube_canonical,
+        ),
     ]
 });
+
+fn youtube_canonical(c: &regex::Captures) -> String {
+    format!("https://www.youtube.com/watch?v={}", &c[1])
+}
 
 fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -187,9 +217,33 @@ mod tests {
     }
 
     #[test]
+    fn youtube_variants() {
+        for url in [
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://youtube.com/watch?v=dQw4w9WgXcQ&t=42s",
+            "https://www.youtube.com/watch?feature=share&v=dQw4w9WgXcQ&list=PL123",
+            "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://music.youtube.com/watch?v=dQw4w9WgXcQ&si=abc",
+            "https://youtu.be/dQw4w9WgXcQ?si=abc",
+            "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+            "https://www.youtube.com/live/dQw4w9WgXcQ?feature=share",
+            "https://www.youtube.com/embed/dQw4w9WgXcQ",
+        ] {
+            let link = one(url);
+            assert_eq!(link.platform, Platform::Youtube, "{url}");
+            assert_eq!(link.url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ", "{url}");
+        }
+        // IDs keep their case and longer IDs are rejected.
+        assert_eq!(one("youtu.be is https://youtu.be/AbC-_12345z").url, "https://www.youtube.com/watch?v=AbC-_12345z");
+        assert!(extract("https://youtu.be/dQw4w9WgXcQextra").is_empty());
+    }
+
+    #[test]
     fn ignores_unsupported_and_dedupes() {
         assert!(extract("https://x.com/someone").is_empty());
-        assert!(extract("https://youtube.com/watch?v=abc").is_empty());
+        assert!(extract("https://youtube.com/watch?v=abc").is_empty()); // ID too short
+        assert!(extract("https://youtube.com/@somechannel").is_empty());
+        assert!(extract("https://vimeo.com/123456").is_empty());
         assert!(extract("just some copied text").is_empty());
 
         let links = extract(

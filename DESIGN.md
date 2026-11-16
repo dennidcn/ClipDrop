@@ -172,7 +172,7 @@ components:
 
 **Creative North Star: "The First-Party Utility"**
 
-ClipDrop is drawn as if Microsoft shipped it in PowerToys. There is no metaphor and no themed world: the Windows 11 Fluent category standard is played straight, and the craft lives in getting the conventions exactly right (WinUI 3 resource values, the Fluent type ramp, double-stroke focus, settings-card anatomy, 46×40 caption buttons). The window is a receipt, glanced at for a few seconds while the app works from the tray, so it is dense, quiet, and immediately legible.
+ClipDrop is drawn as if Microsoft shipped it in PowerToys. There is no metaphor and no themed world: the Windows 11 Fluent category standard is played straight, and the craft lives in getting the conventions exactly right (WinUI 3 resource values, the Fluent type ramp, double-stroke focus, settings-card anatomy, 46×40 caption buttons). The window is a receipt, glanced at for a few seconds to paste a link and check what arrived, so it is dense, quiet, and immediately legible.
 
 Depth comes from the material stack rather than shadow: a Mica backdrop (applied natively; the body goes transparent under `html.mica`, otherwise a solid neutral ground), translucent layer cards over it, and hairline 1px strokes. The theme follows the system light/dark setting through `prefers-color-scheme`; every token has a light and dark value. Color is almost entirely neutral; the Windows default accent blue appears only on the primary action, checked toggles, progress, focus underline, and selection.
 

@@ -6,10 +6,6 @@ use tauri::{AppHandle, Manager};
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
     pub download_dir: String,
-    /// Watch the clipboard for supported links.
-    pub watch_clipboard: bool,
-    /// Start downloading as soon as a link is detected (otherwise it is queued for a click).
-    pub auto_download: bool,
     /// Passed to yt-dlp's `--cookies-from-browser` (e.g. "firefox"). Needed for some Instagram posts.
     pub cookies_browser: String,
     /// Show a system notification when a download finishes while the window is not focused.
@@ -20,8 +16,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             download_dir: String::new(),
-            watch_clipboard: true,
-            auto_download: true,
             cookies_browser: String::new(),
             notify: true,
         }

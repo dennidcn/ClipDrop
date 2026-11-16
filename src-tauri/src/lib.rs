@@ -4,7 +4,7 @@ mod settings;
 mod updater;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,6 +15,7 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
+use downloader::Format;
 use links::{Link, Platform};
 use settings::Settings;
 
@@ -59,8 +60,6 @@ impl Drop for DownloadPermit<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum JobStatus {
-    /// Seen on the clipboard while auto-download is off; waiting for the user.
-    Detected,
     Downloading,
     Done,
     Error,
@@ -72,10 +71,14 @@ struct Job {
     id: u64,
     url: String,
     platform: Platform,
+    /// MP4 (video) or MP3 (audio), from the box the link was pasted into.
+    format: Format,
     status: JobStatus,
     title: Option<String>,
     progress: f64,
     speed: Option<f64>,
+    /// The download finished and the audio is being converted to MP3.
+    converting: bool,
     file: Option<String>,
     error: Option<String>,
 }
@@ -85,6 +88,9 @@ struct Job {
 enum ToolStatus {
     Unknown,
     Installing,
+    /// Fetching ffmpeg, needed once for MP3 conversion.
+    #[serde(rename = "installing-converter")]
+    InstallingConverter,
     Ready,
     Error,
 }
@@ -95,6 +101,12 @@ struct AppState {
     next_id: AtomicU64,
     /// Resolved yt-dlp path. Held locked while installing so concurrent jobs wait for it.
     ytdlp: Mutex<Option<PathBuf>>,
+    /// ffmpeg, needed for MP3 conversion and used by video jobs when present.
+    ffmpeg: ToolSlot,
+    /// Deno, yt-dlp's JavaScript runtime for YouTube.
+    deno: ToolSlot,
+    /// Jobs currently resolving ffmpeg/Deno; the "getting ready" bar clears when this drops to 0.
+    tool_setups: AtomicUsize,
     tool_status: Mutex<ToolStatus>,
     limiter: DownloadLimiter,
     /// Whether the Mica backdrop applied (Windows 11). The UI paints a solid background otherwise.
@@ -138,6 +150,115 @@ fn ensure_ytdlp(app: &AppHandle) -> Result<PathBuf, String> {
     }
 }
 
+/// A helper tool (ffmpeg, Deno) that is found on the machine or installed on first use.
+#[derive(Default)]
+struct ToolSlot {
+    /// Held locked while installing so concurrent jobs that need the tool wait for it.
+    state: Mutex<ToolState>,
+    /// Set during an install, so jobs that only use the tool opportunistically skip it instead of waiting.
+    installing: AtomicBool,
+}
+
+#[derive(Default)]
+struct ToolState {
+    path: Option<PathBuf>,
+    /// The last failed install, so jobs queued behind it fail at once instead of each retrying.
+    failure: Option<(Instant, String)>,
+}
+
+/// After a failed ffmpeg install, how long before another job may try again (e.g. the retry button).
+const FFMPEG_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Returns ffmpeg if one is available. When `install` is set (MP3 jobs) and none is found,
+/// downloads the app-managed copy; video jobs just use ffmpeg when it happens to be there.
+fn ensure_ffmpeg(app: &AppHandle, install: bool) -> Result<Option<PathBuf>, String> {
+    let tool = &app.state::<AppState>().ffmpeg;
+    ensure_tool(app, tool, install, Some(FFMPEG_RETRY_AFTER), downloader::find_ffmpeg, downloader::install_ffmpeg)
+        .map_err(|e| format!("Couldn't get the MP3 converter (ffmpeg): {e}"))
+}
+
+/// Returns Deno for yt-dlp's YouTube JavaScript, installing it on first use. Deno is optional
+/// (yt-dlp still works without it, with fewer formats), so a failed install doesn't fail the job,
+/// and isn't retried until the next launch.
+fn ensure_deno(app: &AppHandle) -> Option<PathBuf> {
+    let tool = &app.state::<AppState>().deno;
+    ensure_tool(app, tool, true, None, downloader::find_deno, downloader::install_deno)
+        .inspect_err(|e| eprintln!("[clipdrop] couldn't install Deno, continuing without it: {e}"))
+        .ok()
+        .flatten()
+}
+
+/// Finds a helper tool, or with `install` downloads the app-managed copy. After a failed install,
+/// further installs are refused until `retry_after` has passed (`None`: for the rest of the session).
+fn ensure_tool(
+    app: &AppHandle,
+    tool: &ToolSlot,
+    install: bool,
+    retry_after: Option<Duration>,
+    find: fn(&std::path::Path) -> Option<PathBuf>,
+    installer: fn(&std::path::Path) -> Result<PathBuf, String>,
+) -> Result<Option<PathBuf>, String> {
+    if !install && tool.installing.load(Ordering::SeqCst) {
+        return Ok(None);
+    }
+    let mut state = tool.state.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(path) = state.path.as_ref().filter(|p| p.is_file()) {
+        return Ok(Some(path.clone()));
+    }
+    let bin_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("bin");
+    if let Some(found) = find(&bin_dir) {
+        state.path = Some(found.clone());
+        return Ok(Some(found));
+    }
+    if !install {
+        return Ok(None);
+    }
+    if let Some((when, error)) = &state.failure
+        && retry_after.is_none_or(|wait| when.elapsed() < wait)
+    {
+        return Err(error.clone());
+    }
+
+    tool.installing.store(true, Ordering::SeqCst);
+    // Cleared by the job's ToolSetup guard once all of its tools are resolved, so it doesn't flicker.
+    set_tool_status(app, ToolStatus::InstallingConverter);
+    let result = installer(&bin_dir);
+    tool.installing.store(false, Ordering::SeqCst);
+    match result {
+        Ok(path) => {
+            state.path = Some(path.clone());
+            state.failure = None;
+            Ok(Some(path))
+        }
+        Err(e) => {
+            state.failure = Some((Instant::now(), e.clone()));
+            Err(e)
+        }
+    }
+}
+
+/// Counts a job resolving its helper tools; the last one to finish clears the "getting ready" bar.
+struct ToolSetup<'a>(&'a AppHandle);
+
+impl<'a> ToolSetup<'a> {
+    fn begin(app: &'a AppHandle) -> Self {
+        app.state::<AppState>().tool_setups.fetch_add(1, Ordering::SeqCst);
+        Self(app)
+    }
+}
+
+impl Drop for ToolSetup<'_> {
+    fn drop(&mut self) {
+        let state = self.0.state::<AppState>();
+        let was_last = state.tool_setups.fetch_sub(1, Ordering::SeqCst) == 1;
+        let installing = *state.tool_status.lock().unwrap() == ToolStatus::InstallingConverter;
+        if was_last && installing {
+            // yt-dlp is already installed whenever helper tools are resolved, so the engine is ready.
+            set_tool_status(self.0, ToolStatus::Ready);
+        }
+    }
+}
+
 fn update_job(app: &AppHandle, id: u64, f: impl FnOnce(&mut Job)) -> Option<Job> {
     let state = app.state::<AppState>();
     let job = {
@@ -150,15 +271,17 @@ fn update_job(app: &AppHandle, id: u64, f: impl FnOnce(&mut Job)) -> Option<Job>
     Some(job)
 }
 
-/// Adds a job for `link` unless one for the same post already exists (and didn't fail).
-fn add_job(app: &AppHandle, link: Link, start: bool) -> Job {
+/// Adds and starts a job for `link` unless one for the same post and format already exists
+/// (and didn't fail). The same post can be saved as both MP4 and MP3.
+fn add_job(app: &AppHandle, link: Link, format: Format) -> Job {
     let state = app.state::<AppState>();
     let (job, is_new) = {
         let mut jobs = state.jobs.lock().unwrap();
-        if let Some(existing) = jobs.iter().find(|j| j.url == link.url && j.status != JobStatus::Error) {
+        let same = |j: &Job| j.url == link.url && j.format == format;
+        if let Some(existing) = jobs.iter().find(|j| same(j) && j.status != JobStatus::Error) {
             (existing.clone(), false)
         } else {
-            jobs.retain(|j| j.url != link.url); // drop an old failed attempt
+            jobs.retain(|j| !same(j)); // drop an old failed attempt
             if jobs.len() >= MAX_JOBS {
                 if let Some(pos) = jobs.iter().rposition(|j| j.status != JobStatus::Downloading) {
                     jobs.remove(pos);
@@ -168,10 +291,12 @@ fn add_job(app: &AppHandle, link: Link, start: bool) -> Job {
                 id: state.next_id.fetch_add(1, Ordering::Relaxed),
                 url: link.url,
                 platform: link.platform,
-                status: JobStatus::Detected,
+                format,
+                status: JobStatus::Downloading,
                 title: None,
                 progress: 0.0,
                 speed: None,
+                converting: false,
                 file: None,
                 error: None,
             };
@@ -181,13 +306,12 @@ fn add_job(app: &AppHandle, link: Link, start: bool) -> Job {
     };
     if is_new {
         let _ = app.emit("job-updated", &job);
-    }
-    if start && job.status == JobStatus::Detected {
-        start_job(app.clone(), job.id);
+        spawn_download(app.clone(), job.clone());
     }
     job
 }
 
+/// Restarts a finished or failed job (the retry button).
 fn start_job(app: AppHandle, id: u64) {
     let job = {
         let state = app.state::<AppState>();
@@ -201,19 +325,35 @@ fn start_job(app: AppHandle, id: u64) {
         j.status = JobStatus::Downloading;
         j.progress = 0.0;
         j.speed = None;
+        j.converting = false;
         j.error = None;
         j.clone()
     };
     let _ = app.emit("job-updated", &job);
+    spawn_download(app, job);
+}
 
+/// Runs the download for `job` (already marked downloading) on a worker thread.
+fn spawn_download(app: AppHandle, job: Job) {
+    let id = job.id;
     std::thread::spawn(move || {
         let state = app.state::<AppState>();
+        // Fetch the tools before taking a permit, so a one-off 200 MB ffmpeg install
+        // doesn't use up download slots that other links could be using.
+        let tools = ensure_ytdlp(&app).and_then(|ytdlp| {
+            let needs_ffmpeg = job.format.needs_ffmpeg(job.platform);
+            let needs_deno = downloader::needs_js_runtime(job.platform);
+            let _setup = (needs_ffmpeg || needs_deno).then(|| ToolSetup::begin(&app));
+            let ffmpeg = ensure_ffmpeg(&app, needs_ffmpeg)?;
+            let deno = if needs_deno { ensure_deno(&app) } else { None };
+            Ok((ytdlp, ffmpeg, deno))
+        });
         let _permit = state.limiter.acquire();
 
-        let result = ensure_ytdlp(&app).and_then(|ytdlp| {
+        let result = tools.and_then(|(ytdlp, ffmpeg, deno)| {
             let settings = state.settings.lock().unwrap().clone();
             let mut last_emit = Instant::now() - Duration::from_secs(1);
-            downloader::download(&ytdlp, &job.url, job.platform, &settings, |event| match event {
+            let on_event = |event| match event {
                 downloader::Event::Title(title) => {
                     update_job(&app, id, |j| j.title = Some(title));
                 }
@@ -230,10 +370,18 @@ fn start_job(app: AppHandle, id: u64) {
                         j.speed = speed;
                     });
                 }
+                downloader::Event::Converting => {
+                    update_job(&app, id, |j| {
+                        j.converting = true;
+                        j.progress = 1.0;
+                        j.speed = None;
+                    });
+                }
                 downloader::Event::File(file) => {
                     update_job(&app, id, |j| j.file = Some(file));
                 }
-            })
+            };
+            downloader::download(&ytdlp, &job.url, job.platform, job.format, &settings, ffmpeg.as_deref(), deno.as_deref(), on_event)
         });
 
         let finished = update_job(&app, id, |j| match &result {
@@ -241,11 +389,13 @@ fn start_job(app: AppHandle, id: u64) {
                 j.status = JobStatus::Done;
                 j.progress = 1.0;
                 j.speed = None;
+                j.converting = false;
                 j.file = files.last().cloned();
             }
             Err(e) => {
                 j.status = JobStatus::Error;
                 j.speed = None;
+                j.converting = false;
                 j.error = Some(e.clone());
             }
         });
@@ -256,6 +406,9 @@ fn start_job(app: AppHandle, id: u64) {
 }
 
 fn notify(app: &AppHandle, job: &Job) {
+    if QUITTING.load(Ordering::SeqCst) {
+        return;
+    }
     if !app.state::<AppState>().settings.lock().unwrap().notify {
         return;
     }
@@ -268,7 +421,11 @@ fn notify(app: &AppHandle, job: &Job) {
     }
     let (title, body) = match job.status {
         JobStatus::Done => (
-            format!("{} video saved", job.platform.label()),
+            if job.format == Format::Mp3 {
+                format!("{} MP3 saved", job.platform.label())
+            } else {
+                format!("{} video saved", job.platform.label())
+            },
             job.title.clone().unwrap_or_else(|| job.url.clone()),
         ),
         _ => (
@@ -277,56 +434,6 @@ fn notify(app: &AppHandle, job: &Job) {
         ),
     };
     let _ = app.notification().builder().title(title).body(body).show();
-}
-
-fn spawn_clipboard_watcher(app: AppHandle) {
-    std::thread::spawn(move || {
-        let mut clipboard = match arboard::Clipboard::new() {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("clipboard unavailable: {e}");
-                return;
-            }
-        };
-        let mut was_watching = app.state::<AppState>().settings.lock().unwrap().watch_clipboard;
-        // Whatever is on the clipboard at launch is not a "new copy".
-        let mut last = if was_watching {
-            clipboard.get_text().unwrap_or_default()
-        } else {
-            String::new()
-        };
-        loop {
-            std::thread::sleep(Duration::from_millis(600));
-            let (watch, auto) = {
-                let state = app.state::<AppState>();
-                let s = state.settings.lock().unwrap();
-                (s.watch_clipboard, s.auto_download)
-            };
-            if !watch {
-                if was_watching {
-                    last.clear();
-                    was_watching = false;
-                }
-                continue;
-            }
-            if !was_watching {
-                // Re-baseline clipboard when re-enabled so old clipboard contents aren't treated as newly copied.
-                last = clipboard.get_text().unwrap_or_default();
-                was_watching = true;
-                continue;
-            }
-
-            let Ok(text) = clipboard.get_text() else { continue };
-            if text == last {
-                continue;
-            }
-            last = text;
-
-            for link in links::extract(&last) {
-                add_job(&app, link, auto);
-            }
-        }
-    });
 }
 
 /// Applies the Windows 11 Mica backdrop to the main window. Returns false where it is unsupported.
@@ -394,12 +501,12 @@ fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> 
 }
 
 #[tauri::command]
-fn add_url(app: AppHandle, text: String) -> Result<Vec<Job>, String> {
+fn add_url(app: AppHandle, text: String, format: Format) -> Result<Vec<Job>, String> {
     let found = links::extract(&text);
     if found.is_empty() {
-        return Err("No X/Twitter, Instagram or TikTok post link found.".into());
+        return Err("No X/Twitter, Instagram, TikTok or YouTube link found.".into());
     }
-    Ok(found.into_iter().map(|link| add_job(&app, link, true)).collect())
+    Ok(found.into_iter().map(|link| add_job(&app, link, format)).collect())
 }
 
 #[tauri::command]
@@ -487,6 +594,9 @@ pub fn run() {
                 jobs: Mutex::new(Vec::new()),
                 next_id: AtomicU64::new(1),
                 ytdlp: Mutex::new(None),
+                ffmpeg: ToolSlot::default(),
+                deno: ToolSlot::default(),
+                tool_setups: AtomicUsize::new(0),
                 tool_status: Mutex::new(ToolStatus::Unknown),
                 limiter: DownloadLimiter::new(),
                 mica,
@@ -498,7 +608,6 @@ pub fn run() {
                 let _ = ensure_ytdlp(&h);
             });
 
-            spawn_clipboard_watcher(handle.clone());
             updater::spawn_background_checks(handle.clone());
 
             let show = MenuItem::with_id(app, "show", "Show ClipDrop", true, None::<&str>)?;
@@ -507,13 +616,13 @@ pub fn run() {
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show, &check_updates, &quit])?;
             let mut tray = TrayIconBuilder::with_id("main")
-                .tooltip("ClipDrop — watching clipboard")
+                .tooltip("ClipDrop")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main(app),
                     "check_updates" => updater::check_now(app.clone()),
-                    "quit" => app.exit(0),
+                    "quit" => request_quit(app.clone()),
                     _ => {}
                 })
                 .on_tray_icon_event(|tray, event| {
@@ -533,10 +642,10 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            // Closing the window keeps the app watching from the tray; quit from the tray menu.
+            // Closing the window quits the app (the tray icon would otherwise keep it alive).
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                request_quit(window.app_handle().clone());
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -552,6 +661,52 @@ pub fn run() {
             open_download_dir,
             update_ytdlp,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app, event| {
+            // Covers every way out (window close, tray Quit, update restart): don't leave yt-dlp running hidden.
+            if let tauri::RunEvent::Exit = event {
+                stop_downloads_for_exit();
+            }
+        });
+}
+
+/// Set once the app is exiting, so downloads it stops aren't reported as failures.
+static QUITTING: AtomicBool = AtomicBool::new(false);
+
+/// Stops running downloads as the app exits (normal quit or an update install).
+pub(crate) fn stop_downloads_for_exit() {
+    QUITTING.store(true, Ordering::SeqCst);
+    downloader::kill_all();
+}
+
+/// Quits, first asking for confirmation if downloads are still running.
+fn request_quit(app: AppHandle) {
+    if !downloads_active(&app) {
+        app.exit(0);
+        return;
+    }
+    // Clicking close or tray Quit again while the prompt is up shouldn't stack a second one.
+    static PROMPT_OPEN: AtomicBool = AtomicBool::new(false);
+    if PROMPT_OPEN.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    // The dialog blocks, so it can't run on the event-loop thread.
+    std::thread::spawn(move || {
+        use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
+        let mut dialog = app
+            .dialog()
+            .message("Downloads are still running. Quitting stops them.")
+            .title("Quit ClipDrop?")
+            .kind(MessageDialogKind::Warning)
+            .buttons(MessageDialogButtons::OkCancelCustom("Quit".into(), "Keep downloading".into()));
+        if let Some(window) = app.get_webview_window("main") {
+            dialog = dialog.parent(&window);
+        }
+        let quit = dialog.blocking_show();
+        PROMPT_OPEN.store(false, Ordering::SeqCst);
+        if quit {
+            app.exit(0);
+        }
+    });
 }

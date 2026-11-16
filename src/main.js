@@ -8,11 +8,10 @@ const jobs = new Map(); // id -> job
 const rows = new Map(); // id -> <li>
 let settings = null;
 
-const PLATFORM = { twitter: "X", instagram: "Instagram", tiktok: "TikTok" };
+const PLATFORM = { twitter: "X", instagram: "Instagram", tiktok: "TikTok", youtube: "YouTube" };
 
 // Segoe Fluent Icons code points
 const G = {
-  link: "",
   download: "",
   done: "",
   error: "",
@@ -63,8 +62,8 @@ function jobTitle(job) {
 function jobMeta(job) {
   const platform = PLATFORM[job.platform];
   switch (job.status) {
-    case "detected": return `${platform} · Waiting for you to start it`;
     case "downloading": {
+      if (job.converting) return `${platform} · Converting to MP3`;
       const pct = job.progress > 0 ? `${Math.round(job.progress * 100)}%` : "Starting";
       return [platform, pct, formatSpeed(job.speed)].filter(Boolean).join(" · ");
     }
@@ -78,11 +77,8 @@ function jobActions(job) {
   const run = (cmd) => () => invoke(cmd, { id }).catch((e) => console.error(e));
   const actions = [];
   switch (job.status) {
-    case "detected":
-      actions.push(el("button", { class: "btn small", onclick: run("start_download"), text: "Download" }));
-      break;
     case "done":
-      actions.push(iconButton(G.open, "Open video", run("open_file")));
+      actions.push(iconButton(G.open, job.format === "mp3" ? "Play MP3" : "Open video", run("open_file")));
       actions.push(iconButton(G.folder, "Show in folder", run("reveal_file")));
       break;
     case "error":
@@ -95,7 +91,7 @@ function jobActions(job) {
   return actions;
 }
 
-const TILE = { detected: G.link, downloading: G.download, done: G.done, error: G.error };
+const TILE = { downloading: G.download, done: G.done, error: G.error };
 
 function buildRow(job) {
   const li = el("li", { class: "job" },
@@ -176,14 +172,7 @@ function syncToggle(input, checked) {
 }
 
 function renderSettings() {
-  syncToggle($("watch"), settings.watchClipboard);
-  syncToggle($("auto"), settings.autoDownload);
   syncToggle($("notify"), settings.notify);
-  $("watch-desc").textContent = settings.watchClipboard
-    ? settings.autoDownload
-      ? "Copied post links download automatically."
-      : "Copied post links are added to the list for you to start."
-    : "Paused. Copied links are ignored.";
   $("cookies").value = settings.cookiesBrowser;
   $("folder-path").textContent = settings.downloadDir;
   $("folder-path").title = settings.downloadDir;
@@ -196,6 +185,7 @@ async function saveSettings(patch) {
 
 const TOOL = {
   installing: { cls: "", title: "Getting ready.", msg: "Downloading the video engine. This only happens once." },
+  "installing-converter": { cls: "", title: "Getting ready.", msg: "Downloading the tools for YouTube and MP3s. This only happens once." },
   error: { cls: "error", title: "Can't download videos yet.", msg: "The video engine didn't install. Check your connection." },
 };
 
@@ -238,9 +228,10 @@ function suppressBrowserChrome() {
   });
 }
 
-function showAddError(msg) {
-  $("add-error").textContent = msg || "";
-  $("add-error").hidden = !msg;
+function showAddError(form, msg) {
+  const error = form.querySelector(".field-error");
+  error.textContent = msg || "";
+  error.hidden = !msg;
 }
 
 // ---------- window frame ----------
@@ -283,22 +274,24 @@ async function init() {
   });
   await listen("tool-status", ({ payload }) => renderToolStatus(payload));
 
-  $("add-form").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    const text = $("add-input").value.trim();
-    if (!text) return;
-    try {
-      await invoke("add_url", { text });
-      $("add-input").value = "";
-      showAddError("");
-    } catch (err) {
-      showAddError(String(err));
-    }
-  });
-  $("add-input").addEventListener("input", () => showAddError(""));
+  // Two boxes: the one a link is pasted into decides MP4 (video) or MP3 (audio).
+  for (const form of document.querySelectorAll("form.add")) {
+    const input = form.querySelector("input");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const text = input.value.trim();
+      if (!text) return;
+      try {
+        await invoke("add_url", { text, format: form.dataset.format });
+        input.value = "";
+        showAddError(form, "");
+      } catch (err) {
+        showAddError(form, String(err));
+      }
+    });
+    input.addEventListener("input", () => showAddError(form, ""));
+  }
 
-  $("watch").addEventListener("change", (e) => saveSettings({ watchClipboard: e.target.checked }));
-  $("auto").addEventListener("change", (e) => saveSettings({ autoDownload: e.target.checked }));
   $("notify").addEventListener("change", (e) => saveSettings({ notify: e.target.checked }));
   $("cookies").addEventListener("change", (e) => saveSettings({ cookiesBrowser: e.target.value }));
 
@@ -341,5 +334,5 @@ async function init() {
 
 init().catch((err) => {
   console.error(err);
-  showAddError(`ClipDrop couldn't start: ${err}`);
+  showAddError(document.querySelector("form.add"), `ClipDrop couldn't start: ${err}`);
 });

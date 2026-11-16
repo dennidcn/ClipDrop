@@ -321,7 +321,9 @@ body.inactive .app-icon { opacity: 0.5; }
 }
 
 /* ---------- Text box, combo box ---------- */
-.add { display: flex; gap: 8px; margin-top: 12px; }
+.add { margin-top: 12px; }
+.add-label { display: block; margin-bottom: 6px; font-size: 14px; line-height: 20px; color: var(--text-1); }
+.add-row { display: flex; gap: 8px; }
 .textbox { flex: 1; min-width: 0; position: relative; }
 .textbox input {
   width: 100%;

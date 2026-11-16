@@ -19,7 +19,7 @@
       <div class="caption">
         <button id="win-min" class="caption-btn" aria-label="Minimize" title="Minimize"><span class="glyph">&#xE921;</span></button>
         <button id="win-max" class="caption-btn" aria-label="Maximize" title="Maximize"><span class="glyph">&#xE922;</span></button>
-        <button id="win-close" class="caption-btn close" aria-label="Close to tray" title="Close (keeps watching in the tray)"><span class="glyph">&#xE8BB;</span></button>
+        <button id="win-close" class="caption-btn close" aria-label="Close" title="Close"><span class="glyph">&#xE8BB;</span></button>
       </div>
     </header>
 
@@ -36,26 +36,26 @@
         <button id="tool-retry" class="btn" hidden>Try again</button>
       </div>
 
-      <section class="card watch">
-        <span class="glyph card-icon" aria-hidden="true">&#xE77F;</span>
-        <div class="card-text">
-          <span class="card-title" id="watch-title">Watch clipboard</span>
-          <span class="card-desc" id="watch-desc"></span>
+      <form class="add" data-format="mp4">
+        <label class="add-label" for="add-mp4">Video (MP4)</label>
+        <div class="add-row">
+          <div class="textbox">
+            <input id="add-mp4" type="text" placeholder="Paste a link to save the video" autocomplete="off" spellcheck="false" aria-label="Link to save as an MP4 video" />
+          </div>
+          <button type="submit" class="btn accent">Download</button>
         </div>
-        <label class="toggle">
-          <span class="toggle-state" id="watch-state">On</span>
-          <input type="checkbox" role="switch" id="watch" aria-labelledby="watch-title" />
-          <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
-        </label>
-      </section>
-
-      <form id="add-form" class="add">
-        <div class="textbox">
-          <input id="add-input" type="text" placeholder="Paste a link to an X, Instagram or TikTok post" autocomplete="off" spellcheck="false" aria-label="Post link" />
-        </div>
-        <button type="submit" class="btn accent">Download</button>
+        <p class="field-error" role="alert" hidden></p>
       </form>
-      <p id="add-error" class="field-error" role="alert" hidden></p>
+      <form class="add" data-format="mp3">
+        <label class="add-label" for="add-mp3">Audio (MP3)</label>
+        <div class="add-row">
+          <div class="textbox">
+            <input id="add-mp3" type="text" placeholder="Paste a link to save the audio" autocomplete="off" spellcheck="false" aria-label="Link to save as an MP3" />
+          </div>
+          <button type="submit" class="btn accent">Download</button>
+        </div>
+        <p class="field-error" role="alert" hidden></p>
+      </form>
 
       <div class="list-head" id="list-head" hidden>
         <h2 id="count">Recent</h2>
@@ -65,8 +65,8 @@
 
       <div id="empty" class="empty">
         <span class="glyph empty-icon" aria-hidden="true">&#xE896;</span>
-        <p class="empty-title">Copy a link to get started</p>
-        <p class="empty-body">ClipDrop saves the video from an X, Instagram or TikTok post as soon as you copy its link. Leave it running in the tray.</p>
+        <p class="empty-title">Paste a link to get started</p>
+        <p class="empty-body">Works with X, Instagram, TikTok and YouTube links. Use the top box for the video, the bottom one for just the audio.</p>
       </div>
     </main>
 
@@ -88,18 +88,6 @@
             <button id="open-folder" class="btn subtle icon" aria-label="Open folder" title="Open folder"><span class="glyph">&#xE8A7;</span></button>
             <button id="folder" class="btn">Change</button>
           </div>
-        </section>
-        <section class="card">
-          <span class="glyph card-icon" aria-hidden="true">&#xE896;</span>
-          <div class="card-text">
-            <span class="card-title" id="auto-title">Download automatically</span>
-            <span class="card-desc">When off, copied links wait in the list until you start them.</span>
-          </div>
-          <label class="toggle">
-            <span class="toggle-state">On</span>
-            <input type="checkbox" role="switch" id="auto" aria-labelledby="auto-title" />
-            <span class="toggle-track" aria-hidden="true"><span class="toggle-knob"></span></span>
-          </label>
         </section>
         <section class="card">
           <span class="glyph card-icon" aria-hidden="true">&#xEA8F;</span>
@@ -147,7 +135,7 @@
           <button id="update" class="btn">Check for updates</button>
         </section>
       </div>
-      <p class="settings-foot">ClipDrop 0.1.0 · Close the window to keep it running in the tray. Quit from the tray icon.</p>
+      <p class="settings-foot">ClipDrop 0.3.0</p>
     </main>
   </body>
 </html>
