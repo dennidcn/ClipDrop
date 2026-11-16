@@ -758,15 +758,12 @@ fn build_args(
         "!is_live",
     ])
     .args(["-P", &format!("home:{}", settings.download_dir)]);
-    if format == Format::Mp3 {
-        // Songs are found by name, so audio files are named after the title.
-        cmd.args(["-o", "%(title).90s [%(id)s].%(ext)s"]);
-    } else {
-        cmd.args([
-            "-o",
-            &format!("{}_%(uploader_id,uploader|unknown).40s_%(id)s.%(ext)s", platform.slug()),
-        ]);
-    }
+    // Both formats are named after the post's title, so files are easy to find in Explorer. The two
+    // names must differ by more than the extension: an MP3 job first downloads e.g. `name.mp4`, and
+    // if a video by that name were already there, yt-dlp would treat it as its own download,
+    // convert it and then delete it. A different name also keeps the stop button's partial-file
+    // cleanup (which matches on the name) from touching the other format's files.
+    cmd.args(["-o", output_template(format)]);
     cmd
     // Use JSON formatting (%()j) so embedded newlines in post titles are escaped and cannot spoof CDFILE| lines.
     .args(["--print", "before_dl:CDTITLE|%(title.0:120)j"])
@@ -820,6 +817,14 @@ fn build_args(
         cmd.args(["--cookies-from-browser", &settings.cookies_browser]);
     }
     cmd.0
+}
+
+/// yt-dlp's `-o` file name for each format (see `build_args` for why they differ).
+fn output_template(format: Format) -> &'static str {
+    match format {
+        Format::Mp3 => "%(title).90s [%(id)s].%(ext)s",
+        Format::Mp4 => "%(title).90s (%(id)s).%(ext)s",
+    }
 }
 
 /// Collects command-line arguments with the same `arg`/`args` shape as `Command`.
@@ -1131,6 +1136,10 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         assert!(yt_video.iter().any(|a| a == "--js-runtimes"));
         assert!(yt_video.windows(2).any(|w| w[0] == "--merge-output-format" && w[1] == "mp4"));
         assert!(!yt_video.iter().any(|a| a == "--extract-audio"));
+        assert!(yt_video.windows(2).any(|w| w[0] == "-o" && w[1] == "%(title).90s (%(id)s).%(ext)s"));
+        // Same post as MP3 and MP4: the names must differ before the extension (see build_args).
+        let stem = |t: &str| t.trim_end_matches(".%(ext)s").to_string();
+        assert_ne!(stem(output_template(Format::Mp3)), stem(output_template(Format::Mp4)));
 
         // MP4 from X without ffmpeg: single-file formats; every job keeps the safety options.
         let video = args_for(Platform::Twitter, Format::Mp4, None);

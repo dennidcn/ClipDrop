@@ -24,15 +24,6 @@ impl Platform {
         }
     }
 
-    pub fn slug(self) -> &'static str {
-        match self {
-            Platform::Twitter => "x",
-            Platform::Instagram => "instagram",
-            Platform::Tiktok => "tiktok",
-            Platform::Youtube => "youtube",
-        }
-    }
-
     /// Strict yt-dlp `--allowed-extractors` value for this platform so shortlinks cannot pivot to arbitrary extractors.
     pub fn allowed_extractors(self) -> &'static str {
         match self {

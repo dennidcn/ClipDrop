@@ -23,7 +23,7 @@ Copy a link, then paste it into one of the two boxes and press **Download**:
 
 | Box | What you get |
 |-----|--------------|
-| **Video (MP4)** | The video as an mp4 (H.264, up to 1080p), which plays everywhere. |
+| **Video (MP4)** | The video as an mp4 (H.264, up to 1080p), which plays everywhere, named after the post's title. |
 | **Audio (MP3)** | Just the audio as an MP3, named after the title, with title, artist and thumbnail as cover art. |
 
 Both boxes take links from any supported site, so you can grab a TikTok's sound as an MP3 or a YouTube video as an MP4. The same post can be saved both ways. Files go to `Downloads\ClipDrop`; you can change this in Settings.
