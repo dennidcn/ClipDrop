@@ -29,7 +29,21 @@ impl Platform {
             Platform::Tiktok => "tiktok",
         }
     }
+
+    /// Strict yt-dlp `--allowed-extractors` value for this platform so shortlinks cannot pivot to arbitrary extractors.
+    pub fn allowed_extractors(self) -> &'static str {
+        match self {
+            Platform::Twitter => "twitter",
+            Platform::Instagram => "instagram",
+            Platform::Tiktok => "tiktok,tiktokvm",
+        }
+    }
 }
+
+/// Maximum bytes of input text scanned for links (protects against huge clipboard payloads).
+const MAX_EXTRACT_BYTES: usize = 32 * 1024;
+/// Maximum distinct links extracted from a single clipboard copy or paste action.
+pub const MAX_LINKS_PER_EXTRACT: usize = 10;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Link {
@@ -67,24 +81,36 @@ static PATTERNS: LazyLock<Vec<(Platform, Regex, Canonicalise)>> = LazyLock::new(
         ),
         (
             Platform::Tiktok,
-            Regex::new(r"(?i)https?://(?:www\.|m\.)?tiktok\.com/@([^/\s?#]+)/video/(\d+)").unwrap(),
+            Regex::new(r"(?i)https?://(?:www\.|m\.)?tiktok\.com/@([a-z0-9_.-]{1,64})/video/(\d+)").unwrap(),
             |c| format!("https://www.tiktok.com/@{}/video/{}", &c[1], &c[2]),
         ),
         (
             Platform::Tiktok,
-            Regex::new(r"(?i)https?://(?:vm|vt)\.tiktok\.com/([a-z0-9]+)").unwrap(),
+            Regex::new(r"(?i)https?://(?:vm|vt)\.tiktok\.com/([a-z0-9_-]+)").unwrap(),
             |c| format!("https://vm.tiktok.com/{}/", &c[1]),
         ),
         (
             Platform::Tiktok,
-            Regex::new(r"(?i)https?://(?:www\.)?tiktok\.com/t/([a-z0-9]+)").unwrap(),
+            Regex::new(r"(?i)https?://(?:www\.)?tiktok\.com/t/([a-z0-9_-]+)").unwrap(),
             |c| format!("https://www.tiktok.com/t/{}/", &c[1]),
         ),
     ]
 });
 
-/// Returns every supported link in `text`, in order of appearance, without duplicates.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// Returns supported links in `text` (up to `MAX_LINKS_PER_EXTRACT`), in order of appearance, without duplicates.
 pub fn extract(text: &str) -> Vec<Link> {
+    let text = truncate_utf8(text, MAX_EXTRACT_BYTES);
     let mut found: Vec<(usize, Link)> = Vec::new();
     for (platform, re, canon) in PATTERNS.iter() {
         for caps in re.captures_iter(text) {
@@ -98,6 +124,9 @@ pub fn extract(text: &str) -> Vec<Link> {
     for (_, link) in found {
         if !out.contains(&link) {
             out.push(link);
+            if out.len() >= MAX_LINKS_PER_EXTRACT {
+                break;
+            }
         }
     }
     out
@@ -168,5 +197,18 @@ mod tests {
         assert_eq!(links.len(), 2);
         assert_eq!(links[0].platform, Platform::Twitter);
         assert_eq!(links[1].platform, Platform::Tiktok);
+    }
+
+    #[test]
+    fn caps_extracted_links_and_truncates_large_inputs() {
+        let many: String = (1..=50)
+            .map(|i| format!("https://x.com/user/status/{i} "))
+            .collect();
+        let links = extract(&many);
+        assert_eq!(links.len(), MAX_LINKS_PER_EXTRACT);
+
+        let padding = "a".repeat(MAX_EXTRACT_BYTES + 1024);
+        let tail = format!("{padding} https://x.com/user/status/999");
+        assert!(extract(&tail).is_empty());
     }
 }

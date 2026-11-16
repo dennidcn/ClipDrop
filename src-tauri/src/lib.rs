@@ -3,8 +3,8 @@ mod links;
 mod settings;
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -16,6 +16,44 @@ use tauri_plugin_opener::OpenerExt;
 
 use links::{Link, Platform};
 use settings::Settings;
+
+const MAX_CONCURRENT_DOWNLOADS: usize = 3;
+const MAX_JOBS: usize = 200;
+
+struct DownloadLimiter {
+    active: Mutex<usize>,
+    cvar: Condvar,
+}
+
+impl DownloadLimiter {
+    fn new() -> Self {
+        Self {
+            active: Mutex::new(0),
+            cvar: Condvar::new(),
+        }
+    }
+
+    fn acquire(&self) -> DownloadPermit<'_> {
+        let mut active = self.active.lock().unwrap();
+        while *active >= MAX_CONCURRENT_DOWNLOADS {
+            active = self.cvar.wait(active).unwrap();
+        }
+        *active += 1;
+        DownloadPermit { limiter: self }
+    }
+}
+
+struct DownloadPermit<'a> {
+    limiter: &'a DownloadLimiter,
+}
+
+impl Drop for DownloadPermit<'_> {
+    fn drop(&mut self) {
+        let mut active = self.limiter.active.lock().unwrap();
+        *active = active.saturating_sub(1);
+        self.limiter.cvar.notify_one();
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -57,6 +95,7 @@ struct AppState {
     /// Resolved yt-dlp path. Held locked while installing so concurrent jobs wait for it.
     ytdlp: Mutex<Option<PathBuf>>,
     tool_status: Mutex<ToolStatus>,
+    limiter: DownloadLimiter,
     /// Whether the Mica backdrop applied (Windows 11). The UI paints a solid background otherwise.
     mica: bool,
 }
@@ -79,7 +118,9 @@ fn ensure_ytdlp(app: &AppHandle) -> Result<PathBuf, String> {
     let state = app.state::<AppState>();
     let mut slot = state.ytdlp.lock().unwrap();
     if let Some(path) = slot.as_ref() {
-        return Ok(path.clone());
+        if path.is_file() {
+            return Ok(path.clone());
+        }
     }
     let bin_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("bin");
     set_tool_status(app, ToolStatus::Installing);
@@ -117,6 +158,11 @@ fn add_job(app: &AppHandle, link: Link, start: bool) -> Job {
             (existing.clone(), false)
         } else {
             jobs.retain(|j| j.url != link.url); // drop an old failed attempt
+            if jobs.len() >= MAX_JOBS {
+                if let Some(pos) = jobs.iter().rposition(|j| j.status != JobStatus::Downloading) {
+                    jobs.remove(pos);
+                }
+            }
             let job = Job {
                 id: state.next_id.fetch_add(1, Ordering::Relaxed),
                 url: link.url,
@@ -142,18 +188,29 @@ fn add_job(app: &AppHandle, link: Link, start: bool) -> Job {
 }
 
 fn start_job(app: AppHandle, id: u64) {
-    let Some(job) = update_job(&app, id, |j| {
+    let job = {
+        let state = app.state::<AppState>();
+        let mut jobs = state.jobs.lock().unwrap();
+        let Some(j) = jobs.iter_mut().find(|j| j.id == id) else {
+            return;
+        };
+        if j.status == JobStatus::Downloading {
+            return;
+        }
         j.status = JobStatus::Downloading;
         j.progress = 0.0;
         j.speed = None;
         j.error = None;
-    }) else {
-        return;
+        j.clone()
     };
+    let _ = app.emit("job-updated", &job);
 
     std::thread::spawn(move || {
+        let state = app.state::<AppState>();
+        let _permit = state.limiter.acquire();
+
         let result = ensure_ytdlp(&app).and_then(|ytdlp| {
-            let settings = app.state::<AppState>().settings.lock().unwrap().clone();
+            let settings = state.settings.lock().unwrap().clone();
             let mut last_emit = Instant::now() - Duration::from_secs(1);
             downloader::download(&ytdlp, &job.url, job.platform, &settings, |event| match event {
                 downloader::Event::Title(title) => {
@@ -230,23 +287,40 @@ fn spawn_clipboard_watcher(app: AppHandle) {
                 return;
             }
         };
+        let mut was_watching = app.state::<AppState>().settings.lock().unwrap().watch_clipboard;
         // Whatever is on the clipboard at launch is not a "new copy".
-        let mut last = clipboard.get_text().unwrap_or_default();
+        let mut last = if was_watching {
+            clipboard.get_text().unwrap_or_default()
+        } else {
+            String::new()
+        };
         loop {
             std::thread::sleep(Duration::from_millis(600));
+            let (watch, auto) = {
+                let state = app.state::<AppState>();
+                let s = state.settings.lock().unwrap();
+                (s.watch_clipboard, s.auto_download)
+            };
+            if !watch {
+                if was_watching {
+                    last.clear();
+                    was_watching = false;
+                }
+                continue;
+            }
+            if !was_watching {
+                // Re-baseline clipboard when re-enabled so old clipboard contents aren't treated as newly copied.
+                last = clipboard.get_text().unwrap_or_default();
+                was_watching = true;
+                continue;
+            }
+
             let Ok(text) = clipboard.get_text() else { continue };
             if text == last {
                 continue;
             }
             last = text;
 
-            let (watch, auto) = {
-                let s = app.state::<AppState>().settings.lock().unwrap().clone();
-                (s.watch_clipboard, s.auto_download)
-            };
-            if !watch {
-                continue;
-            }
             for link in links::extract(&last) {
                 add_job(&app, link, auto);
             }
@@ -272,15 +346,17 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-fn job_file(state: &AppState, id: u64) -> Result<String, String> {
-    state
+fn job_file(state: &AppState, id: u64) -> Result<PathBuf, String> {
+    let file = state
         .jobs
         .lock()
         .unwrap()
         .iter()
         .find(|j| j.id == id)
         .and_then(|j| j.file.clone())
-        .ok_or_else(|| "file not available".into())
+        .ok_or_else(|| "file not available".to_string())?;
+    let download_dir = state.settings.lock().unwrap().download_dir.clone();
+    downloader::validate_downloaded_file(&file, &download_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +379,7 @@ fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> 
     if settings.download_dir.trim().is_empty() {
         settings.download_dir = state.settings.lock().unwrap().download_dir.clone();
     }
+    settings.validate()?;
     settings.save(&app)?;
     *state.settings.lock().unwrap() = settings.clone();
     Ok(settings)
@@ -348,7 +425,9 @@ async fn pick_folder(app: AppHandle) -> Option<String> {
 #[tauri::command]
 fn open_file(app: AppHandle, state: State<AppState>, id: u64) -> Result<(), String> {
     let file = job_file(&state, id)?;
-    app.opener().open_path(file, None::<&str>).map_err(|e| e.to_string())
+    app.opener()
+        .open_path(file.to_string_lossy().as_ref(), None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -359,16 +438,26 @@ fn reveal_file(state: State<AppState>, id: u64) -> Result<(), String> {
 
 #[tauri::command]
 fn open_download_dir(app: AppHandle, state: State<AppState>) -> Result<(), String> {
-    let dir = state.settings.lock().unwrap().download_dir.clone();
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    app.opener().open_path(dir, None::<&str>).map_err(|e| e.to_string())
+    let mut settings = state.settings.lock().unwrap().clone();
+    settings.validate()?;
+    std::fs::create_dir_all(&settings.download_dir).map_err(|e| e.to_string())?;
+    let canon_dir = std::fs::canonicalize(&settings.download_dir).map_err(|e| e.to_string())?;
+    if !canon_dir.is_dir() {
+        return Err("Download location is not a directory.".into());
+    }
+    app.opener()
+        .open_path(canon_dir.to_string_lossy().as_ref(), None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn update_ytdlp(app: AppHandle) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let path = ensure_ytdlp(&app)?;
-        downloader::self_update(&path)
+        let bin_dir = app.path().app_local_data_dir().map_err(|e| e.to_string())?.join("bin");
+        let (updated_path, msg) = downloader::self_update(&path, &bin_dir)?;
+        *app.state::<AppState>().ytdlp.lock().unwrap() = Some(updated_path);
+        Ok(msg)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -390,6 +479,7 @@ pub fn run() {
                 next_id: AtomicU64::new(1),
                 ytdlp: Mutex::new(None),
                 tool_status: Mutex::new(ToolStatus::Unknown),
+                limiter: DownloadLimiter::new(),
                 mica,
             });
 
