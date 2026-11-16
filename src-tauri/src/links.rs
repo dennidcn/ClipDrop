@@ -35,7 +35,8 @@ impl Platform {
         match self {
             Platform::Twitter => "twitter",
             Platform::Instagram => "instagram",
-            Platform::Tiktok => "tiktok,tiktokvm",
+            // Names are regexes matched against yt-dlp extractor names; short links use `vm.tiktok`.
+            Platform::Tiktok => r"tiktok,vm\.tiktok",
         }
     }
 }

@@ -243,9 +243,10 @@ fn decode_printed_value(raw: &str) -> Option<String> {
 
 /// Verifies that `file` exists as a regular file inside `download_dir` and has an allowed media extension.
 pub fn validate_downloaded_file(file: &str, download_dir: &str) -> Result<PathBuf, String> {
-    let canon_dir = std::fs::canonicalize(download_dir)
+    // dunce avoids Windows verbatim (`\\?\C:\...`) paths, which shell APIs (open/reveal) often reject.
+    let canon_dir = dunce::canonicalize(download_dir)
         .map_err(|_| "Download folder does not exist.".to_string())?;
-    let canon_file = std::fs::canonicalize(file)
+    let canon_file = dunce::canonicalize(file)
         .map_err(|_| "Downloaded file does not exist.".to_string())?;
 
     if !canon_file.starts_with(&canon_dir) {
@@ -285,6 +286,15 @@ pub fn download(
         .map_err(|e| format!("cannot create download folder: {e}"))?;
 
     let mut cmd = command(ytdlp);
+    cmd.args(build_args(platform, &settings, ffmpeg_path()));
+    cmd.arg("--").arg(url).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| format!("failed to start yt-dlp: {e}"))?;
+    read_output(&mut child, &settings.download_dir, &mut on_event)
+}
+
+/// The yt-dlp options (everything before `-- URL`) used for a download.
+fn build_args(platform: Platform, settings: &Settings, ffmpeg: Option<&Path>) -> Vec<std::ffi::OsString> {
+    let mut cmd = ArgList::default();
     cmd.args([
         "--newline",
         "--progress",
@@ -297,7 +307,7 @@ pub fn download(
         "2G",
         "--socket-timeout",
         "30",
-        "--allowed-extractors",
+        "--use-extractors",
         platform.allowed_extractors(),
     ])
     .args(["-P", &format!("home:{}", settings.download_dir)])
@@ -313,7 +323,7 @@ pub fn download(
         "download:CDPROG|%(progress.downloaded_bytes)s|%(progress.total_bytes,progress.total_bytes_estimate)s|%(progress.speed)s",
     ]);
 
-    if let Some(ffmpeg) = ffmpeg_path() {
+    if let Some(ffmpeg) = ffmpeg {
         cmd.arg("--ffmpeg-location")
             .arg(ffmpeg)
             .args(["-f", "bv*[ext=mp4]+ba[ext=m4a]/bv*+ba/b", "--merge-output-format", "mp4"]);
@@ -325,10 +335,31 @@ pub fn download(
     if !settings.cookies_browser.is_empty() {
         cmd.args(["--cookies-from-browser", &settings.cookies_browser]);
     }
+    cmd.0
+}
 
-    cmd.arg("--").arg(url).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = cmd.spawn().map_err(|e| format!("failed to start yt-dlp: {e}"))?;
+/// Collects command-line arguments with the same `arg`/`args` shape as `Command`.
+#[derive(Default)]
+struct ArgList(Vec<std::ffi::OsString>);
 
+impl ArgList {
+    fn arg(&mut self, a: impl AsRef<std::ffi::OsStr>) -> &mut Self {
+        self.0.push(a.as_ref().to_os_string());
+        self
+    }
+    fn args<I: IntoIterator<Item = S>, S: AsRef<std::ffi::OsStr>>(&mut self, items: I) -> &mut Self {
+        for a in items {
+            self.arg(a);
+        }
+        self
+    }
+}
+
+fn read_output(
+    child: &mut std::process::Child,
+    download_dir: &str,
+    on_event: &mut impl FnMut(Event),
+) -> Result<Vec<String>, String> {
     // Read stdout and stderr on separate threads while tagging their source stream.
     let (tx, rx) = mpsc::channel::<PipeLine>();
     let mut readers = Vec::new();
@@ -373,10 +404,14 @@ pub fn download(
                     }
                 } else if let Some(raw_file) = line.strip_prefix("CDFILE|") {
                     if let Some(file_str) = decode_printed_value(raw_file) {
-                        if let Ok(valid_path) = validate_downloaded_file(&file_str, &settings.download_dir) {
-                            let canonical_str = valid_path.to_string_lossy().into_owned();
-                            files.push(canonical_str.clone());
-                            on_event(Event::File(canonical_str));
+                        match validate_downloaded_file(&file_str, download_dir) {
+                            Ok(valid_path) => {
+                                let canonical_str = valid_path.to_string_lossy().into_owned();
+                                files.push(canonical_str.clone());
+                                on_event(Event::File(canonical_str));
+                            }
+                            // Surface why a finished download was discarded instead of "no video found".
+                            Err(e) => errors.push(e),
                         }
                     }
                 }
@@ -461,5 +496,75 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         assert!(validate_downloaded_file(&outside_video.to_string_lossy(), &sub_str).is_err());
 
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A real yt-dlp to check our arguments against: `CLIPDROP_YTDLP`, the app-managed copy, or `PATH`.
+    fn real_ytdlp() -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os("CLIPDROP_YTDLP").map(PathBuf::from) {
+            return Some(p);
+        }
+        let managed = std::env::var_os("LOCALAPPDATA")
+            .map(|d| PathBuf::from(d).join("com.clipdrop.app").join("bin").join(EXE_NAME))
+            .filter(|p| p.is_file());
+        managed.or_else(|| find_in_path(EXE_NAME))
+    }
+
+    fn test_settings() -> Settings {
+        Settings {
+            download_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            cookies_browser: "firefox".into(),
+            ..Default::default()
+        }
+    }
+
+    /// Runs yt-dlp with our real download options, pointed at a dead proxy so nothing leaves the machine.
+    fn run_real(ytdlp: &Path, platform: Platform, url: &str) -> String {
+        let mut settings = test_settings();
+        settings.cookies_browser.clear(); // don't touch the developer's browser profile
+        let out = command(ytdlp)
+            .args(build_args(platform, &settings, None))
+            .args(["--simulate", "--ignore-config", "--proxy", "http://127.0.0.1:9", "--retries", "0"])
+            .arg("--")
+            .arg(url)
+            .output()
+            .expect("run yt-dlp");
+        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+    }
+
+    #[test]
+    fn real_ytdlp_accepts_our_options_and_extractors() {
+        let Some(ytdlp) = real_ytdlp() else {
+            eprintln!("skipping: no yt-dlp found (set CLIPDROP_YTDLP)");
+            return;
+        };
+
+        // Option parsing happens before `--version` prints, so unknown flags fail here (offline).
+        for platform in [Platform::Twitter, Platform::Instagram, Platform::Tiktok] {
+            let out = command(&ytdlp)
+                .args(build_args(platform, &test_settings(), Some(&ytdlp)))
+                .arg("--version")
+                .output()
+                .expect("run yt-dlp");
+            assert!(
+                out.status.success(),
+                "yt-dlp rejected options for {platform:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+
+        for (platform, url) in [
+            (Platform::Twitter, "https://x.com/user/status/1"),
+            (Platform::Instagram, "https://www.instagram.com/reel/abc/"),
+            (Platform::Tiktok, "https://www.tiktok.com/@user/video/123"),
+            (Platform::Tiktok, "https://vm.tiktok.com/ZMabc/"),
+            (Platform::Tiktok, "https://www.tiktok.com/t/ZTabc/"),
+        ] {
+            let out = run_real(&ytdlp, platform, url);
+            assert!(!out.contains("No suitable extractor"), "{url} not matched by allowlist:\n{out}");
+        }
+
+        // The allowlist must block pivoting to other sites.
+        let out = run_real(&ytdlp, Platform::Twitter, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+        assert!(out.contains("No suitable extractor"), "allowlist let a YouTube URL through:\n{out}");
     }
 }

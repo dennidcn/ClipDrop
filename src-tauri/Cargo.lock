@@ -529,6 +529,7 @@ name = "clipdrop"
 version = "0.1.0"
 dependencies = [
  "arboard",
+ "dunce",
  "regex",
  "serde",
  "serde_json",

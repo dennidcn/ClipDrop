@@ -24,6 +24,7 @@ regex = "1"
 arboard = { version = "3", default-features = false }
 ureq = "2"
 sha2 = "0.10"
+dunce = "1"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.8"
