@@ -17,6 +17,15 @@
         "value": "segoe fluent icons",
         "createdAt": "2026-11-15T16:02:50.775Z",
         "reason": "agent: Windows system icon font, documented as the icon system in DESIGN.md, not a text face"
+      },
+      {
+        "rule": "layout-transition",
+        "value": "*",
+        "files": [
+          "src/styles.css"
+        ],
+        "createdAt": "2026-11-16T16:44:38.677Z",
+        "reason": "Claude triage: pre-existing (b182817), intentional Fluent motion - the toggle knob stretch mimics the WinUI ToggleSwitch on a 12px absolutely positioned element, and the progress bar animates width to show determinate progress; neither reflows surrounding content"
       }
     ]
   }
