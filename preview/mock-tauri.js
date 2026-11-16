@@ -8,8 +8,9 @@
     { id: 6, url: "https://x.com/i/status/1857000000000000002", platform: "twitter", format: "mp3", status: "stopped", title: "launch day recap", progress: 0, speed: null },
     { id: 4, url: "https://vm.tiktok.com/ZMabc123/", platform: "tiktok", format: "mp4", status: "downloading", title: null, progress: 0, speed: null },
     { id: 3, url: "https://www.tiktok.com/@kitchen.lab/video/7431", platform: "tiktok", format: "mp4", status: "done", title: "30-second ramen upgrade #cooking", progress: 1, file: String.raw`C:\Users\me\Downloads\ClipDrop\tiktok_kitchen.lab_7431000000.mp4` },
-    { id: 2, url: "https://www.instagram.com/reel/C9xQ/", platform: "instagram", format: "mp4", status: "error", title: null, progress: 0, error: "Instagram requires you to be logged in. Choose a browser under Settings > Use browser sign-in." },
-    { id: 1, url: "https://www.youtube.com/watch?v=jNQXAC9IVRw", platform: "youtube", format: "mp3", status: "done", title: "Me at the zoo", progress: 1, file: String.raw`C:\Users\me\Downloads\ClipDrop\Me at the zoo [jNQXAC9IVRw].mp3` },
+    { id: 2, url: "https://www.instagram.com/reel/C9xQ/", platform: "instagram", format: "mp4", status: "error", title: null, progress: 0, error: "Instagram wants you signed in to save this. Choose the browser you're logged in with.", fix: "signIn", errorDetail: "[Instagram] C9xQ: Requested content is not available, rate-limit reached or login required." },
+    { id: 8, url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ", platform: "youtube", format: "mp3", clip: { start: 43, end: 85 }, status: "done", title: "Never Gonna Give You Up", progress: 1, file: String.raw`C:\Users\me\Downloads\ClipDrop\Never Gonna Give You Up (clip 0m43s-1m25s) [dQw4w9WgXcQ].mp3` },
+    { id: 1, url: "https://www.youtube.com/watch?v=jNQXAC9IVRw", platform: "youtube", format: "mp3", status: "done", alreadySaved: true, title: "Me at the zoo", progress: 1, file: String.raw`C:\Users\me\Downloads\ClipDrop\Me at the zoo [jNQXAC9IVRw].mp3` },
   ];
   const toolStatus = MODE === "installing" ? "installing" : MODE === "error" ? "error" : "ready";
   window.__TAURI__ = {
@@ -18,7 +19,7 @@
         console.log("[mock invoke]", cmd, args ?? "");
         if (cmd === "get_snapshot") {
           return {
-            settings: { downloadDir: String.raw`C:\Users\me\Downloads\ClipDrop`, cookiesBrowser: "", notify: true },
+            settings: { downloadDir: String.raw`C:\Users\me\Downloads\ClipDrop`, cookiesBrowser: "", notify: true, videoQuality: "1080", maxDownloads: 3 },
             jobs, toolStatus, mica: false,
           };
         }

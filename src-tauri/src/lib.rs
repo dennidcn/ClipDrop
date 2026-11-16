@@ -1,4 +1,5 @@
 mod downloader;
+mod errors;
 mod history;
 mod links;
 mod settings;
@@ -17,24 +18,34 @@ use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
-use downloader::Format;
+use downloader::{Clip, Format};
+use errors::{Failure, Fix};
 use links::{Link, Platform};
 use settings::Settings;
 
-const MAX_CONCURRENT_DOWNLOADS: usize = 3;
 const MAX_JOBS: usize = 200;
 
 struct DownloadLimiter {
     active: Mutex<usize>,
+    /// How many downloads may run at once (the "Downloads at once" setting).
+    max: AtomicUsize,
     cvar: Condvar,
 }
 
 impl DownloadLimiter {
-    fn new() -> Self {
+    fn new(max: usize) -> Self {
         Self {
             active: Mutex::new(0),
+            max: AtomicUsize::new(max),
             cvar: Condvar::new(),
         }
+    }
+
+    /// Changes the limit. Raising it starts queued downloads at once; lowering it lets running
+    /// ones finish and holds back new ones until there's room.
+    fn set_max(&self, max: usize) {
+        self.max.store(max, Ordering::SeqCst);
+        self.wake_all();
     }
 
     /// Waits for a free download slot. Returns `None` if `halted` turns true while waiting
@@ -45,7 +56,7 @@ impl DownloadLimiter {
             if halted() {
                 return None;
             }
-            if *active < MAX_CONCURRENT_DOWNLOADS {
+            if *active < self.max.load(Ordering::SeqCst) {
                 break;
             }
             active = self.cvar.wait(active).unwrap();
@@ -119,6 +130,8 @@ struct Job {
     platform: Platform,
     /// MP4 (video) or MP3 (audio), from the box the link was pasted into.
     format: Format,
+    /// Only this part of the video is saved.
+    clip: Option<Clip>,
     status: JobStatus,
     title: Option<String>,
     progress: f64,
@@ -126,7 +139,14 @@ struct Job {
     /// The download finished and the audio is being converted to MP3.
     converting: bool,
     file: Option<String>,
+    /// The file was already in the folder from an earlier download, so nothing was downloaded.
+    already_saved: bool,
+    /// One plain sentence saying why the download failed.
     error: Option<String>,
+    /// The one-click fix to offer for `error`, if there is one.
+    fix: Option<Fix>,
+    /// yt-dlp's own wording of `error`, shown on hover.
+    error_detail: Option<String>,
     /// Files yt-dlp started saving, so stopping can delete their partial files.
     #[serde(skip)]
     destinations: Vec<String>,
@@ -141,12 +161,20 @@ struct StoredJob {
     url: String,
     platform: Platform,
     format: Format,
+    #[serde(default)]
+    clip: Option<Clip>,
     status: JobStatus,
     title: Option<String>,
     #[serde(default)]
     progress: f64,
     file: Option<String>,
+    #[serde(default)]
+    already_saved: bool,
     error: Option<String>,
+    #[serde(default)]
+    fix: Option<Fix>,
+    #[serde(default)]
+    error_detail: Option<String>,
     #[serde(default)]
     destinations: Vec<String>,
 }
@@ -158,12 +186,16 @@ impl From<&Job> for StoredJob {
             url: j.url.clone(),
             platform: j.platform,
             format: j.format,
+            clip: j.clip,
             // A download running when ClipDrop exits is resumable from its partial files next time.
             status: if j.status == JobStatus::Downloading { JobStatus::Paused } else { j.status },
             title: j.title.clone(),
             progress: j.progress,
             file: j.file.clone(),
+            already_saved: j.already_saved,
             error: j.error.clone(),
+            fix: j.fix,
+            error_detail: j.error_detail.clone(),
             destinations: j.destinations.clone(),
         }
     }
@@ -186,13 +218,17 @@ impl StoredJob {
             url: self.url,
             platform: self.platform,
             format: self.format,
+            clip: self.clip,
             status: if self.status == JobStatus::Downloading { JobStatus::Paused } else { self.status },
             title: self.title,
             progress: if self.progress.is_finite() { self.progress.clamp(0.0, 1.0) } else { 0.0 },
             speed: None,
             converting: false,
             file: self.file,
+            already_saved: self.already_saved,
             error: self.error,
+            fix: self.fix,
+            error_detail: self.error_detail,
             destinations: self.destinations,
         })
     }
@@ -408,13 +444,14 @@ fn write_history(app: &AppHandle) {
     }
 }
 
-/// Adds and starts a job for `link` unless one for the same post and format already exists
+/// Adds and starts a job for `link` unless one for the same post, format and clip already exists
 /// (and didn't fail or get stopped). The same post can be saved as both MP4 and MP3.
-/// Pasting the link of a paused job again resumes it.
-fn add_job(app: &AppHandle, link: Link, format: Format) -> Job {
+/// Pasting the link of a paused job again resumes it. A file saved by an earlier session is
+/// noticed once the download starts (see `downloader::Saved::already_saved`).
+fn add_job(app: &AppHandle, link: Link, format: Format, clip: Option<Clip>) -> Job {
     let state = app.state::<AppState>();
     let mut jobs = state.jobs.lock().unwrap();
-    let same = |j: &Job| j.url == link.url && j.format == format;
+    let same = |j: &Job| j.url == link.url && j.format == format && j.clip == clip;
     let reusable = |j: &Job| same(j) && !matches!(j.status, JobStatus::Error | JobStatus::Stopped);
     if let Some(existing) = jobs.iter().find(|j| reusable(j)).cloned() {
         drop(jobs);
@@ -434,13 +471,17 @@ fn add_job(app: &AppHandle, link: Link, format: Format) -> Job {
         url: link.url,
         platform: link.platform,
         format,
+        clip,
         status: JobStatus::Downloading,
         title: None,
         progress: 0.0,
         speed: None,
         converting: false,
         file: None,
+        already_saved: false,
         error: None,
+        fix: None,
+        error_detail: None,
         destinations: Vec::new(),
     };
     jobs.insert(0, job.clone());
@@ -479,6 +520,8 @@ fn start_job(app: &AppHandle, id: u64) -> Option<Job> {
         j.speed = None;
         j.converting = false;
         j.error = None;
+        j.fix = None;
+        j.error_detail = None;
         (j.clone(), register_control(&state, id))
     };
     let _ = app.emit("job-updated", &job);
@@ -495,18 +538,19 @@ fn spawn_download(app: AppHandle, job: Job, control: Arc<Control>) {
         // Fetch the tools before taking a permit, so a one-off 200 MB ffmpeg install
         // doesn't use up download slots that other links could be using.
         let tools = ensure_ytdlp(&app).and_then(|ytdlp| {
-            let needs_ffmpeg = job.format.needs_ffmpeg(job.platform);
+            let needs_ffmpeg = job.format.needs_ffmpeg(job.platform, job.clip);
             let needs_deno = downloader::needs_js_runtime(job.platform);
             let _setup = (needs_ffmpeg || needs_deno).then(|| ToolSetup::begin(&app));
             let ffmpeg = ensure_ffmpeg(&app, needs_ffmpeg)?;
             let deno = if needs_deno { ensure_deno(&app) } else { None };
             Ok((ytdlp, ffmpeg, deno))
-        });
+        })
+        .map_err(Failure::from);
         // A job paused or stopped while queued gives up its place without starting.
         let permit = state.limiter.acquire(|| control.halt().is_some());
 
         let result = match permit {
-            None => Err(String::new()),
+            None => Err(Failure::from(String::new())),
             Some(_) => tools.and_then(|(ytdlp, ffmpeg, deno)| {
                 let settings = state.settings.lock().unwrap().clone();
                 let mut last_emit = Instant::now() - Duration::from_secs(1);
@@ -551,6 +595,7 @@ fn spawn_download(app: AppHandle, job: Job, control: Arc<Control>) {
                     &job.url,
                     job.platform,
                     job.format,
+                    job.clip,
                     &settings,
                     ffmpeg.as_deref(),
                     deno.as_deref(),
@@ -572,10 +617,15 @@ fn spawn_download(app: AppHandle, job: Job, control: Arc<Control>) {
             j.speed = None;
             j.converting = false;
             match (&result, halt) {
-                (Ok(files), _) => {
+                (Ok(saved), _) => {
                     j.status = JobStatus::Done;
                     j.progress = 1.0;
-                    j.file = files.last().cloned();
+                    j.file = saved.files.last().cloned();
+                    j.already_saved = saved.already_saved;
+                    if saved.already_saved {
+                        // yt-dlp may have fetched a thumbnail before it was ended.
+                        leftovers = std::mem::take(&mut j.destinations);
+                    }
                 }
                 (Err(_), Some(Halt::Pause)) => j.status = JobStatus::Paused,
                 (Err(_), Some(Halt::Stop)) => {
@@ -583,9 +633,11 @@ fn spawn_download(app: AppHandle, job: Job, control: Arc<Control>) {
                     j.progress = 0.0;
                     leftovers = std::mem::take(&mut j.destinations);
                 }
-                (Err(e), None) => {
+                (Err(failure), None) => {
                     j.status = JobStatus::Error;
-                    j.error = Some(e.clone());
+                    j.error = Some(failure.message.clone());
+                    j.fix = failure.fix;
+                    j.error_detail = failure.detail.clone();
                 }
             }
         });
@@ -651,11 +703,12 @@ fn notify(app: &AppHandle, job: &Job) {
     }
     let (title, body) = match job.status {
         JobStatus::Done => (
-            if job.format == Format::Mp3 {
-                format!("{} MP3 saved", job.platform.label())
-            } else {
-                format!("{} video saved", job.platform.label())
-            },
+            format!(
+                "{} {} {}",
+                job.platform.label(),
+                if job.format == Format::Mp3 { "MP3" } else { "video" },
+                if job.already_saved { "was already saved" } else { "saved" }
+            ),
             job.title.clone().unwrap_or_else(|| job.url.clone()),
         ),
         _ => (
@@ -727,16 +780,24 @@ fn save_settings(app: AppHandle, state: State<AppState>, settings: Settings) -> 
     settings.validate()?;
     settings.save(&app)?;
     *state.settings.lock().unwrap() = settings.clone();
+    state.limiter.set_max(settings.max_downloads);
     Ok(settings)
 }
 
 #[tauri::command]
-fn add_url(app: AppHandle, text: String, format: Format) -> Result<Vec<Job>, String> {
+fn add_url(
+    app: AppHandle,
+    text: String,
+    format: Format,
+    start: Option<String>,
+    end: Option<String>,
+) -> Result<Vec<Job>, String> {
+    let clip = Clip::parse(start.as_deref().unwrap_or(""), end.as_deref().unwrap_or(""))?;
     let found = links::extract(&text);
     if found.is_empty() {
         return Err("No X/Twitter, Instagram, TikTok or YouTube link found.".into());
     }
-    Ok(found.into_iter().map(|link| add_job(&app, link, format)).collect())
+    Ok(found.into_iter().map(|link| add_job(&app, link, format, clip)).collect())
 }
 
 #[tauri::command]
@@ -843,8 +904,10 @@ pub fn run() {
                 .collect();
             jobs.truncate(MAX_JOBS);
             let next_id = jobs.iter().map(|j| j.id).max().unwrap_or(0) + 1;
+            let settings = Settings::load(&handle);
+            let limiter = DownloadLimiter::new(settings.max_downloads);
             app.manage(AppState {
-                settings: Mutex::new(Settings::load(&handle)),
+                settings: Mutex::new(settings),
                 jobs: Mutex::new(jobs),
                 history_io: Mutex::new(()),
                 controls: Mutex::new(HashMap::new()),
@@ -854,7 +917,7 @@ pub fn run() {
                 deno: ToolSlot::default(),
                 tool_setups: AtomicUsize::new(0),
                 tool_status: Mutex::new(ToolStatus::Unknown),
-                limiter: DownloadLimiter::new(),
+                limiter,
                 mica,
             });
 

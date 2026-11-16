@@ -42,7 +42,13 @@
           <div class="textbox">
             <input id="add-mp4" type="text" placeholder="Paste a link to save the video" autocomplete="off" spellcheck="false" aria-label="Link to save as an MP4 video" />
           </div>
+          <button type="button" class="btn subtle icon trim-toggle" aria-label="Save only part of the video" title="Save only part" aria-expanded="false" aria-controls="clip-mp4"><span class="glyph">&#xE8C6;</span></button>
           <button type="submit" class="btn accent">Download</button>
+        </div>
+        <div class="clip-row" id="clip-mp4" hidden>
+          <label class="clip-field"><span>From</span><input name="start" type="text" inputmode="numeric" placeholder="0:30" autocomplete="off" spellcheck="false" /></label>
+          <label class="clip-field"><span>To</span><input name="end" type="text" inputmode="numeric" placeholder="1:10" autocomplete="off" spellcheck="false" /></label>
+          <span class="clip-hint">Leave To empty to go to the end.</span>
         </div>
         <p class="field-error" role="alert" hidden></p>
       </form>
@@ -52,7 +58,13 @@
           <div class="textbox">
             <input id="add-mp3" type="text" placeholder="Paste a link to save the audio" autocomplete="off" spellcheck="false" aria-label="Link to save as an MP3" />
           </div>
+          <button type="button" class="btn subtle icon trim-toggle" aria-label="Save only part of the audio" title="Save only part" aria-expanded="false" aria-controls="clip-mp3"><span class="glyph">&#xE8C6;</span></button>
           <button type="submit" class="btn accent">Download</button>
+        </div>
+        <div class="clip-row" id="clip-mp3" hidden>
+          <label class="clip-field"><span>From</span><input name="start" type="text" inputmode="numeric" placeholder="0:30" autocomplete="off" spellcheck="false" /></label>
+          <label class="clip-field"><span>To</span><input name="end" type="text" inputmode="numeric" placeholder="1:10" autocomplete="off" spellcheck="false" /></label>
+          <span class="clip-hint">Leave To empty to go to the end.</span>
         </div>
         <p class="field-error" role="alert" hidden></p>
       </form>
@@ -90,6 +102,38 @@
           </div>
         </section>
         <section class="card">
+          <span class="glyph card-icon" aria-hidden="true">&#xE714;</span>
+          <div class="card-text">
+            <span class="card-title" id="quality-title">Video quality</span>
+            <span class="card-desc">Best can be 4K on YouTube, but may not play in every app.</span>
+          </div>
+          <div class="combo">
+            <select id="quality" aria-labelledby="quality-title">
+              <option value="720">720p</option>
+              <option value="1080">1080p</option>
+              <option value="best">Best</option>
+            </select>
+            <span class="glyph combo-chevron" aria-hidden="true">&#xE70D;</span>
+          </div>
+        </section>
+        <section class="card">
+          <span class="glyph card-icon" aria-hidden="true">&#xE896;</span>
+          <div class="card-text">
+            <span class="card-title" id="parallel-title">Downloads at once</span>
+            <span class="card-desc">More finishes a batch sooner on a fast connection. The rest wait their turn.</span>
+          </div>
+          <div class="combo">
+            <select id="parallel" aria-labelledby="parallel-title">
+              <option value="1">1</option>
+              <option value="2">2</option>
+              <option value="3">3</option>
+              <option value="4">4</option>
+              <option value="5">5</option>
+            </select>
+            <span class="glyph combo-chevron" aria-hidden="true">&#xE70D;</span>
+          </div>
+        </section>
+        <section class="card">
           <span class="glyph card-icon" aria-hidden="true">&#xEA8F;</span>
           <div class="card-text">
             <span class="card-title" id="notify-title">Notifications</span>
@@ -105,7 +149,7 @@
 
       <h2 class="group-title">Sign-in</h2>
       <div class="group">
-        <section class="card">
+        <section class="card" id="cookies-card">
           <span class="glyph card-icon" aria-hidden="true">&#xE774;</span>
           <div class="card-text">
             <span class="card-title" id="cookies-title">Use browser sign-in</span>

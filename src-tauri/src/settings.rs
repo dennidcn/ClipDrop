@@ -10,7 +10,39 @@ pub struct Settings {
     pub cookies_browser: String,
     /// Show a system notification when a download finishes while the window is not focused.
     pub notify: bool,
+    /// Highest resolution saved from the Video (MP4) box.
+    pub video_quality: VideoQuality,
+    /// How many downloads run at the same time; the rest wait their turn.
+    pub max_downloads: usize,
 }
+
+/// The Video quality setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoQuality {
+    /// Up to 720p H.264: smaller files, for slow connections.
+    #[serde(rename = "720")]
+    P720,
+    /// Up to 1080p H.264: plays everywhere (the default).
+    #[serde(rename = "1080")]
+    P1080,
+    /// The highest resolution offered (4K on YouTube), in whatever codec it comes in.
+    #[serde(rename = "best")]
+    Best,
+}
+
+impl VideoQuality {
+    /// The height cap, if any.
+    pub fn max_height(self) -> Option<u32> {
+        match self {
+            VideoQuality::P720 => Some(720),
+            VideoQuality::P1080 => Some(1080),
+            VideoQuality::Best => None,
+        }
+    }
+}
+
+pub const MIN_DOWNLOADS: usize = 1;
+pub const MAX_DOWNLOADS: usize = 5;
 
 impl Default for Settings {
     fn default() -> Self {
@@ -18,6 +50,8 @@ impl Default for Settings {
             download_dir: String::new(),
             cookies_browser: String::new(),
             notify: true,
+            video_quality: VideoQuality::P1080,
+            max_downloads: 3,
         }
     }
 }
@@ -63,6 +97,10 @@ impl Settings {
             return Err("Download directory must be a valid local absolute path.".into());
         }
         self.download_dir = dir;
+
+        if !(MIN_DOWNLOADS..=MAX_DOWNLOADS).contains(&self.max_downloads) {
+            return Err(format!("Downloads at once must be {MIN_DOWNLOADS} to {MAX_DOWNLOADS}."));
+        }
         Ok(())
     }
 
@@ -84,6 +122,7 @@ impl Settings {
         } else {
             settings.download_dir = settings.download_dir.trim().to_string();
         }
+        settings.max_downloads = settings.max_downloads.clamp(MIN_DOWNLOADS, MAX_DOWNLOADS);
         settings
     }
 
@@ -121,5 +160,26 @@ mod tests {
         assert!(!is_valid_download_dir("//attacker.example/share"));
         assert!(!is_valid_download_dir("relative/path"));
         assert!(!is_valid_download_dir(""));
+    }
+
+    #[test]
+    fn reads_older_settings_and_checks_new_ones() {
+        // A settings file from before these options existed gets the defaults.
+        let old: Settings = serde_json::from_str(r#"{"notify":false}"#).unwrap();
+        assert_eq!(old.video_quality, VideoQuality::P1080);
+        assert_eq!(old.max_downloads, 3);
+        let s: Settings = serde_json::from_str(r#"{"videoQuality":"best","maxDownloads":5}"#).unwrap();
+        assert_eq!(s.video_quality, VideoQuality::Best);
+
+        let mut s = Settings {
+            download_dir: if cfg!(windows) { r"C:\Users\test\Downloads".into() } else { "/tmp/downloads".into() },
+            max_downloads: 0,
+            ..Default::default()
+        };
+        assert!(s.validate().is_err());
+        s.max_downloads = 6;
+        assert!(s.validate().is_err());
+        s.max_downloads = 1;
+        assert!(s.validate().is_ok());
     }
 }

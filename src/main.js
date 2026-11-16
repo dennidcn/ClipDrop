@@ -62,22 +62,62 @@ function jobTitle(job) {
   return job.title || job.url.replace(/^https?:\/\/(www\.)?/, "");
 }
 
+/** Seconds as 1:05 or 1:02:05. */
+function clock(s) {
+  const h = Math.floor(s / 3600), m = Math.floor(s / 60) % 60, sec = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${sec}` : `${m}:${sec}`;
+}
+
+/** "Clip 0:30–1:10" for a job that saves only part of the video. */
+function clipLabel(clip) {
+  if (!clip) return "";
+  return `Clip ${clock(clip.start)}–${clip.end == null ? "end" : clock(clip.end)}`;
+}
+
 function jobMeta(job) {
-  const platform = PLATFORM[job.platform];
+  const where = [PLATFORM[job.platform], clipLabel(job.clip)].filter(Boolean).join(" · ");
   switch (job.status) {
     case "downloading": {
-      if (job.converting) return `${platform} · Converting to MP3`;
+      if (job.converting) return `${where} · Converting to MP3`;
       const pct = job.progress > 0 ? `${Math.round(job.progress * 100)}%` : "Starting";
-      return [platform, pct, formatSpeed(job.speed)].filter(Boolean).join(" · ");
+      return [where, pct, formatSpeed(job.speed)].filter(Boolean).join(" · ");
     }
     case "paused": {
       const pct = job.progress > 0 ? `${Math.round(job.progress * 100)}%` : "";
-      return [platform, "Paused", pct].filter(Boolean).join(" · ");
+      return [where, "Paused", pct].filter(Boolean).join(" · ");
     }
-    case "stopped": return `${platform} · Stopped`;
-    case "done": return `${platform} · ${fileName(job.file) || "Saved"}`;
+    case "stopped": return `${where} · Stopped`;
+    case "done":
+      return [where, job.alreadySaved ? "Already saved" : "", fileName(job.file) || "Saved"].filter(Boolean).join(" · ");
     case "error": return job.error || "The download failed.";
   }
+}
+
+/** The one obvious fix offered next to a failed download. */
+const FIX = {
+  signIn: { label: "Browser sign-in", run: () => showSignIn() },
+  update: { label: "Update and retry", run: (id, button) => updateAndRetry(id, button) },
+};
+
+function showSignIn() {
+  show("page-settings");
+  const card = $("cookies-card");
+  card.scrollIntoView({ block: "center" });
+  $("cookies").focus({ preventScroll: true });
+  card.classList.remove("highlight");
+  void card.offsetWidth; // restart the highlight animation
+  card.classList.add("highlight");
+}
+
+async function updateAndRetry(id, button) {
+  button.disabled = true;
+  button.textContent = "Updating…";
+  try {
+    await invoke("update_ytdlp");
+  } catch (err) {
+    console.error(err); // retry anyway: the current engine may still work
+  }
+  await invoke("start_download", { id }).catch(console.error);
 }
 
 function jobActions(job) {
@@ -99,9 +139,16 @@ function jobActions(job) {
       actions.push(iconButton(G.folder, "Show in folder", run("reveal_file")));
       break;
     case "error":
-    case "stopped":
+    case "stopped": {
+      const fix = job.status === "error" && FIX[job.fix];
+      if (fix) {
+        const button = el("button", { class: "btn small fix", text: fix.label });
+        button.addEventListener("click", () => fix.run(id, button));
+        actions.push(button);
+      }
       actions.push(iconButton(G.retry, job.status === "stopped" ? "Download again" : "Try again", run("start_download")));
       break;
+    }
   }
   if (!IN_PROGRESS.has(job.status)) {
     actions.push(iconButton(G.remove, "Remove from list", () => removeJob(id)));
@@ -130,10 +177,11 @@ function buildRow(job) {
 /** Updates a row in place so hover and focus survive frequent progress events. */
 function patchRow(li, job) {
   // Actions are rebuilt only when they change, so hover and focus survive progress updates.
-  const actionKey = `${job.status}${job.converting ? ":converting" : ""}`;
+  const actionKey = `${job.status}${job.converting ? ":converting" : ""}${job.fix ? `:${job.fix}` : ""}`;
   const actionsChanged = li.dataset.actions !== actionKey;
   li.className = `job ${job.status}`;
-  li.title = job.url;
+  // A reworded error keeps yt-dlp's original on hover, for searching or reporting it.
+  li.title = job.status === "error" && job.errorDetail ? `${job.errorDetail}\n\n${job.url}` : job.url;
   li.querySelector(".job-tile").textContent = TILE[job.status];
   li.querySelector(".job-title").textContent = jobTitle(job);
   li.querySelector(".job-meta").textContent = jobMeta(job);
@@ -200,6 +248,8 @@ function syncToggle(input, checked) {
 function renderSettings() {
   syncToggle($("notify"), settings.notify);
   $("cookies").value = settings.cookiesBrowser;
+  $("quality").value = settings.videoQuality;
+  $("parallel").value = String(settings.maxDownloads);
   $("folder-path").textContent = settings.downloadDir;
   $("folder-path").title = settings.downloadDir;
 }
@@ -283,6 +333,41 @@ function initDropTarget(form, addLinks) {
   });
 }
 
+// ---------- trim ----------
+
+/**
+ * The scissors button next to a box reveals From/To fields that limit the next download from it
+ * to part of the video. They clear and close again once that download is added.
+ */
+function initClip(form) {
+  const toggle = form.querySelector(".trim-toggle");
+  const row = form.querySelector(".clip-row");
+  const start = row.querySelector('[name="start"]');
+  const end = row.querySelector('[name="end"]');
+  const setOpen = (open) => {
+    row.hidden = !open;
+    toggle.setAttribute("aria-expanded", String(open));
+    toggle.classList.toggle("on", open);
+  };
+  toggle.addEventListener("click", () => {
+    const open = row.hidden;
+    setOpen(open);
+    if (open) {
+      start.focus();
+    } else {
+      start.value = end.value = "";
+      form.querySelector(".textbox input").focus();
+    }
+  });
+  return {
+    range: () => (row.hidden ? {} : { start: start.value, end: end.value }),
+    reset: () => {
+      start.value = end.value = "";
+      setOpen(false);
+    },
+  };
+}
+
 function showAddError(form, msg) {
   const error = form.querySelector(".field-error");
   error.textContent = msg || "";
@@ -331,11 +416,13 @@ async function init() {
 
   // Two boxes: the one a link is pasted (or dropped) into decides MP4 (video) or MP3 (audio).
   for (const form of document.querySelectorAll("form.add")) {
-    const input = form.querySelector("input");
+    const input = form.querySelector(".textbox input");
+    const clip = initClip(form);
     const addLinks = async (text) => {
       try {
-        await invoke("add_url", { text, format: form.dataset.format });
+        await invoke("add_url", { text, format: form.dataset.format, ...clip.range() });
         input.value = "";
+        clip.reset();
         showAddError(form, "");
       } catch (err) {
         showAddError(form, String(err));
@@ -346,7 +433,7 @@ async function init() {
       const text = input.value.trim();
       if (text) addLinks(text);
     });
-    input.addEventListener("input", () => showAddError(form, ""));
+    form.addEventListener("input", () => showAddError(form, ""));
     initDropTarget(form, addLinks);
   }
   // Anything dropped outside the boxes is ignored, rather than the webview navigating to it.
@@ -354,6 +441,8 @@ async function init() {
 
   $("notify").addEventListener("change", (e) => saveSettings({ notify: e.target.checked }));
   $("cookies").addEventListener("change", (e) => saveSettings({ cookiesBrowser: e.target.value }));
+  $("quality").addEventListener("change", (e) => saveSettings({ videoQuality: e.target.value }));
+  $("parallel").addEventListener("change", (e) => saveSettings({ maxDownloads: Number(e.target.value) }));
 
   $("folder").addEventListener("click", async () => {
     const dir = await invoke("pick_folder");

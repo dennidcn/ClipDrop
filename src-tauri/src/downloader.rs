@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
+use crate::errors::{self, Failure};
 use crate::links::Platform;
 use crate::settings::Settings;
 
@@ -439,10 +440,93 @@ pub enum Format {
 
 impl Format {
     /// Whether this download can't be done properly without ffmpeg (so it is installed if missing).
-    /// MP3 always converts; YouTube serves good video only as separate streams that ffmpeg merges.
-    pub fn needs_ffmpeg(self, platform: Platform) -> bool {
-        self == Format::Mp3 || platform == Platform::Youtube
+    /// MP3 always converts; YouTube serves good video only as separate streams that ffmpeg merges;
+    /// and yt-dlp cuts clips with ffmpeg.
+    pub fn needs_ffmpeg(self, platform: Platform, clip: Option<Clip>) -> bool {
+        self == Format::Mp3 || platform == Platform::Youtube || clip.is_some()
     }
+}
+
+/// Part of a video to save (yt-dlp's `--download-sections`), in whole seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Clip {
+    pub start: u32,
+    /// `None`: to the end.
+    pub end: Option<u32>,
+}
+
+/// Longest time accepted in a clip box (100 hours), so nothing overflows.
+const MAX_CLIP_SECONDS: u32 = 100 * 3600;
+
+impl Clip {
+    /// Reads the From and To boxes. Both empty means the whole video. Times are `1:10`,
+    /// `1:02:03` or plain seconds; an empty From starts at the beginning, an empty To runs to the end.
+    pub fn parse(start: &str, end: &str) -> Result<Option<Clip>, String> {
+        let (start, end) = (start.trim(), end.trim());
+        if start.is_empty() && end.is_empty() {
+            return Ok(None);
+        }
+        let time = |s: &str| {
+            parse_time(s).ok_or_else(|| format!("\"{s}\" isn't a time. Use minutes and seconds, like 1:10."))
+        };
+        let start = if start.is_empty() { 0 } else { time(start)? };
+        let end = if end.is_empty() { None } else { Some(time(end)?) };
+        if end.is_some_and(|end| end <= start) {
+            return Err("The end of the clip has to come after its start.".into());
+        }
+        if start == 0 && end.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Clip { start, end }))
+    }
+
+    /// yt-dlp's `--download-sections` value, e.g. `*30-70` or `*30-inf`.
+    fn section(self) -> String {
+        match self.end {
+            Some(end) => format!("*{}-{end}", self.start),
+            None => format!("*{}-inf", self.start),
+        }
+    }
+
+    /// Added to the file name so a clip doesn't collide with the whole video or other clips:
+    /// ` (clip 0m30s-1m10s)`. Windows file names can't contain `:`.
+    fn file_suffix(self) -> String {
+        let t = |s: u32| {
+            if s >= 3600 {
+                format!("{}h{:02}m{:02}s", s / 3600, s / 60 % 60, s % 60)
+            } else {
+                format!("{}m{:02}s", s / 60, s % 60)
+            }
+        };
+        let end = self.end.map_or_else(|| "end".to_string(), t);
+        format!(" (clip {}-{end})", t(self.start))
+    }
+}
+
+/// `1:10` -> 70, `1:02:03` -> 3723, `45` -> 45.
+fn parse_time(s: &str) -> Option<u32> {
+    let parts: Vec<&str> = s.split(':').collect();
+    if parts.len() > 3 || parts.iter().any(|p| p.is_empty() || p.len() > 6 || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    let mut total: u64 = 0;
+    for (i, part) in parts.iter().enumerate() {
+        let n: u64 = part.parse().ok()?;
+        // Minutes and seconds after the first part must be under 60.
+        if i > 0 && n >= 60 {
+            return None;
+        }
+        total = total * 60 + n;
+    }
+    u32::try_from(total).ok().filter(|t| *t <= MAX_CLIP_SECONDS)
+}
+
+/// What a finished download left in the folder.
+#[derive(Debug)]
+pub struct Saved {
+    pub files: Vec<String>,
+    /// The file was already in the folder from an earlier download, so nothing was downloaded.
+    pub already_saved: bool,
 }
 
 /// Whether yt-dlp needs a JavaScript runtime (Deno) for this site.
@@ -455,35 +539,38 @@ enum PipeLine {
     Stderr(String),
 }
 
-/// Downloads `url` into the configured directory. Returns the paths of the finished files.
+/// Downloads `url` into the configured directory (just `clip` of it, if set).
+#[allow(clippy::too_many_arguments)]
 pub fn download(
     ytdlp: &Path,
     url: &str,
     platform: Platform,
     format: Format,
+    clip: Option<Clip>,
     settings: &Settings,
     ffmpeg: Option<&Path>,
     deno: Option<&Path>,
     stopper: &Stopper,
     mut on_event: impl FnMut(Event),
-) -> Result<Vec<String>, String> {
+) -> Result<Saved, Failure> {
     let mut settings = settings.clone();
     settings.validate()?;
-    if format.needs_ffmpeg(platform) && ffmpeg.is_none() {
-        return Err(match format {
-            Format::Mp3 => "Converting to MP3 needs ffmpeg, which isn't available.".into(),
+    if format.needs_ffmpeg(platform, clip) && ffmpeg.is_none() {
+        return Err(Failure::from(match format {
+            Format::Mp3 => "Converting to MP3 needs ffmpeg, which isn't available.".to_string(),
+            Format::Mp4 if clip.is_some() => "Saving part of a video needs ffmpeg, which isn't available.".into(),
             Format::Mp4 => format!("{} videos need ffmpeg, which isn't available.", platform.label()),
-        });
+        }));
     }
 
     std::fs::create_dir_all(&settings.download_dir)
         .map_err(|e| format!("cannot create download folder: {e}"))?;
 
     let mut cmd = command(ytdlp);
-    cmd.args(build_args(platform, format, &settings, ffmpeg, deno));
+    cmd.args(build_args(platform, format, clip, &settings, ffmpeg, deno));
     cmd.arg("--").arg(url).stdout(Stdio::piped()).stderr(Stdio::piped());
     if stopper.is_stopped() {
-        return Err(STOPPED.into());
+        return Err(STOPPED.to_string().into());
     }
     let mut child = cmd.spawn().map_err(|e| format!("failed to start yt-dlp: {e}"))?;
     stopper.attach(contain(&child));
@@ -492,11 +579,15 @@ pub fn download(
         Format::Mp3 => "Nothing was saved. If this is a live stream, try again once it has ended.",
         Format::Mp4 => "No video was found in this post. If it's a live stream, try again once it has ended.",
     };
-    let result = read_output(&mut child, &settings.download_dir, nothing_found, &mut on_event);
+    let output = Output { download_dir: &settings.download_dir, format, nothing_found, stopper };
+    let result = read_output(&mut child, &output, &mut on_event).map_err(|raw| match raw {
+        RawError::YtDlp(e) => errors::explain(&e, platform, &settings.cookies_browser),
+        RawError::Own(e) => Failure::from(e),
+    });
     // Closing the download's job handle also ends anything yt-dlp left behind.
     stopper.detach();
     if stopper.is_stopped() && result.is_err() {
-        return Err(STOPPED.into());
+        return Err(STOPPED.to_string().into());
     }
     result
 }
@@ -731,6 +822,7 @@ mod job {
 fn build_args(
     platform: Platform,
     format: Format,
+    clip: Option<Clip>,
     settings: &Settings,
     ffmpeg: Option<&Path>,
     deno: Option<&Path>,
@@ -763,7 +855,10 @@ fn build_args(
     // if a video by that name were already there, yt-dlp would treat it as its own download,
     // convert it and then delete it. A different name also keeps the stop button's partial-file
     // cleanup (which matches on the name) from touching the other format's files.
-    cmd.args(["-o", output_template(format)]);
+    cmd.arg("-o").arg(output_template(format, clip));
+    if let Some(clip) = clip {
+        cmd.args(["--download-sections", &clip.section()]);
+    }
     cmd
     // Use JSON formatting (%()j) so embedded newlines in post titles are escaped and cannot spoof CDFILE| lines.
     .args(["--print", "before_dl:CDTITLE|%(title.0:120)j"])
@@ -800,17 +895,19 @@ fn build_args(
             "jpg",
         ]);
     } else if let Some(ffmpeg) = ffmpeg {
-        // Prefer H.264 (plays everywhere, unlike AV1/VP9) and cap at 1080p so YouTube videos stay
-        // well under --max-filesize; X, Instagram and TikTok rarely go above that anyway.
         cmd.arg("--ffmpeg-location").arg(ffmpeg).args([
             "-f",
-            "bv*[vcodec^=avc1][height<=1080]+ba[ext=m4a]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/bv*[height<=1080]+ba/b",
+            &video_format(settings.video_quality.max_height()),
             "--merge-output-format",
             "mp4",
         ]);
     } else {
         // Without ffmpeg we can't merge separate audio/video streams, so stick to single-file formats.
-        cmd.args(["-f", "b[ext=mp4]/b"]);
+        let format = match settings.video_quality.max_height() {
+            Some(h) => format!("b[height<={h}][ext=mp4]/b[height<={h}]/b[ext=mp4]/b"),
+            None => "b[ext=mp4]/b".into(),
+        };
+        cmd.args(["-f", &format]);
     }
 
     if !settings.cookies_browser.is_empty() {
@@ -819,11 +916,25 @@ fn build_args(
     cmd.0
 }
 
-/// yt-dlp's `-o` file name for each format (see `build_args` for why they differ).
-fn output_template(format: Format) -> &'static str {
+/// yt-dlp's `-f` for video with ffmpeg available. Capped (720p or 1080p): prefer H.264, which plays
+/// everywhere, unlike AV1/VP9, and keeps YouTube videos well under --max-filesize. Uncapped ("Best"):
+/// the highest resolution offered, which on YouTube means VP9 or AV1 for 1440p and 4K.
+fn video_format(max_height: Option<u32>) -> String {
+    match max_height {
+        Some(h) => format!(
+            "bv*[vcodec^=avc1][height<={h}]+ba[ext=m4a]/bv*[height<={h}][ext=mp4]+ba[ext=m4a]/bv*[height<={h}]+ba/b[height<={h}]/b"
+        ),
+        None => "bv*+ba/b".into(),
+    }
+}
+
+/// yt-dlp's `-o` file name for each format (see `build_args` for why they differ). A clip gets
+/// its range in the name, so it doesn't clash with the whole video or another clip of it.
+fn output_template(format: Format, clip: Option<Clip>) -> String {
+    let clip = clip.map(Clip::file_suffix).unwrap_or_default();
     match format {
-        Format::Mp3 => "%(title).90s [%(id)s].%(ext)s",
-        Format::Mp4 => "%(title).90s (%(id)s).%(ext)s",
+        Format::Mp3 => format!("%(title).90s{clip} [%(id)s].%(ext)s"),
+        Format::Mp4 => format!("%(title).90s{clip} (%(id)s).%(ext)s"),
     }
 }
 
@@ -865,10 +976,10 @@ fn progress_event(line: &str, on_event: &mut impl FnMut(Event)) -> bool {
 
 fn read_output(
     child: &mut std::process::Child,
-    download_dir: &str,
-    nothing_found: &str,
+    out: &Output,
     on_event: &mut impl FnMut(Event),
-) -> Result<Vec<String>, String> {
+) -> Result<Saved, RawError> {
+    let download_dir = out.download_dir;
     // Read stdout and stderr on separate threads while tagging their source stream.
     let (tx, rx) = mpsc::channel::<PipeLine>();
     let mut readers = Vec::new();
@@ -898,17 +1009,32 @@ fn read_output(
 
     let mut files = Vec::new();
     let mut errors = Vec::new();
+    let mut started = false;
+    let mut already_saved = false;
     for item in rx {
         match item {
             PipeLine::Stdout(line) => {
                 if progress_event(&line, on_event) {
+                    started = true;
                 } else if let Some(raw_title) = line.strip_prefix("CDTITLE|") {
                     if let Some(title) = decode_printed_value(raw_title) {
                         on_event(Event::Title(title));
                     }
                 } else if let Some(raw_dest) = line.strip_prefix("CDDEST|") {
                     if let Some(dest) = decode_printed_value(raw_dest) {
+                        // Saved by an earlier download (maybe before a restart)? Then stop here,
+                        // before anything is fetched, and point at that file. Only for the first
+                        // file: in a post with several videos, yt-dlp skips the ones it already has.
+                        let existing = (!started && files.is_empty())
+                            .then(|| finished_file(&dest, out.format, download_dir))
+                            .flatten();
                         on_event(Event::Destination(dest));
+                        if let Some(existing) = existing {
+                            out.stopper.stop();
+                            already_saved = true;
+                            on_event(Event::File(existing.clone()));
+                            files.push(existing);
+                        }
                     }
                 } else if let Some(raw_file) = line.strip_prefix("CDFILE|") {
                     if let Some(file_str) = decode_printed_value(raw_file) {
@@ -919,17 +1045,17 @@ fn read_output(
                                 on_event(Event::File(canonical_str));
                             }
                             // Surface why a finished download was discarded instead of "no video found".
-                            Err(e) => errors.push(e),
+                            Err(e) => errors.push(RawError::Own(e)),
                         }
                     }
                 }
             }
             PipeLine::Stderr(line) => {
                 if let Some(err) = line.strip_prefix("ERROR: ") {
-                    errors.push(err.to_string());
+                    errors.push(RawError::YtDlp(err.to_string()));
                 } else {
                     // In quiet mode (implied by --print) yt-dlp writes progress to stderr.
-                    progress_event(&line, on_event);
+                    started |= progress_event(&line, on_event);
                 }
             }
         }
@@ -938,25 +1064,59 @@ fn read_output(
         let _ = r.join();
     }
 
-    let status = child.wait().map_err(|e| e.to_string())?;
+    let status = child.wait().map_err(|e| RawError::Own(e.to_string()))?;
+    if already_saved {
+        // yt-dlp was ended on purpose, so its exit status doesn't matter.
+        return Ok(Saved { files, already_saved });
+    }
     if status.success() || status.code() == Some(101) {
         // Exit code 101 is yt-dlp's standard exit code when --max-downloads is reached.
         if !files.is_empty() {
-            return Ok(files);
+            return Ok(Saved { files, already_saved });
         }
     }
     if let Some(err) = errors.pop() {
         Err(err)
     } else if status.success() {
-        Err(nothing_found.into())
+        Err(RawError::Own(out.nothing_found.into()))
     } else {
-        Err(format!("yt-dlp exited with {status}"))
+        Err(RawError::Own(format!("yt-dlp exited with {status}")))
     }
+}
+
+/// What `read_output` needs besides the process.
+struct Output<'a> {
+    download_dir: &'a str,
+    format: Format,
+    nothing_found: &'a str,
+    /// Used to end yt-dlp when the file turns out to be saved already.
+    stopper: &'a Stopper,
+}
+
+/// A failed download's message: yt-dlp's own (explained for the user later) or one of ours.
+#[derive(Debug, PartialEq)]
+enum RawError {
+    YtDlp(String),
+    Own(String),
+}
+
+/// The finished file a download headed for `dest` (yt-dlp's planned file name) would leave,
+/// if it is already in the download folder. An MP3 job's planned name has the source's extension
+/// (`.webm`, `.m4a`) until it is converted; a video's is already the final `.mp4`.
+fn finished_file(dest: &str, format: Format, download_dir: &str) -> Option<String> {
+    let dest = Path::new(dest);
+    let finished = match format {
+        Format::Mp3 => dest.with_extension("mp3"),
+        Format::Mp4 => dest.to_path_buf(),
+    };
+    let valid = validate_downloaded_file(&finished.to_string_lossy(), download_dir).ok()?;
+    Some(valid.to_string_lossy().into_owned())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::VideoQuality;
 
     #[test]
     fn parses_sha256sums_correctly() {
@@ -1033,7 +1193,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         let mut settings = test_settings();
         settings.cookies_browser.clear(); // don't touch the developer's browser profile
         let out = command(ytdlp)
-            .args(build_args(platform, Format::Mp4, &settings, None, None))
+            .args(build_args(platform, Format::Mp4, None, &settings, None, None))
             .args(["--simulate", "--ignore-config", "--proxy", "http://127.0.0.1:9", "--retries", "0"])
             .arg("--")
             .arg(url)
@@ -1054,7 +1214,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
             for format in [Format::Mp4, Format::Mp3] {
                 for ffmpeg in [Some(ytdlp.as_path()), None] {
                     let out = command(&ytdlp)
-                        .args(build_args(platform, format, &test_settings(), ffmpeg, Some(&ytdlp)))
+                        .args(build_args(platform, format, None, &test_settings(), ffmpeg, Some(&ytdlp)))
                         .arg("--version")
                         .output()
                         .expect("run yt-dlp");
@@ -1109,7 +1269,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
     fn format_decides_the_yt_dlp_options() {
         let tool = Path::new(r"C:\tools\x.exe");
         let args_for = |platform, format, ffmpeg| -> Vec<String> {
-            build_args(platform, format, &test_settings(), ffmpeg, Some(tool))
+            build_args(platform, format, None, &test_settings(), ffmpeg, Some(tool))
                 .iter()
                 .map(|a| a.to_string_lossy().into_owned())
                 .collect()
@@ -1139,12 +1299,12 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         assert!(yt_video.windows(2).any(|w| w[0] == "-o" && w[1] == "%(title).90s (%(id)s).%(ext)s"));
         // Same post as MP3 and MP4: the names must differ before the extension (see build_args).
         let stem = |t: &str| t.trim_end_matches(".%(ext)s").to_string();
-        assert_ne!(stem(output_template(Format::Mp3)), stem(output_template(Format::Mp4)));
+        assert_ne!(stem(&output_template(Format::Mp3, None)), stem(&output_template(Format::Mp4, None)));
 
         // MP4 from X without ffmpeg: single-file formats; every job keeps the safety options.
         let video = args_for(Platform::Twitter, Format::Mp4, None);
         assert_eq!(video[0], "--ignore-config");
-        assert!(video.windows(2).any(|w| w[0] == "-f" && w[1] == "b[ext=mp4]/b"));
+        assert!(video.windows(2).any(|w| w[0] == "-f" && w[1] == "b[height<=1080][ext=mp4]/b[height<=1080]/b[ext=mp4]/b"));
         assert!(video.windows(2).any(|w| w[0] == "--match-filter" && w[1] == "!is_live"));
         assert!(!video.iter().any(|a| a == "--extract-audio" || a == "--js-runtimes"));
     }
@@ -1188,7 +1348,8 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         assert!(parse_get_filehash("Path : C:\\deno.zip", "deno.zip").is_none());
     }
 
-    /// Network test: installs ffmpeg and Deno into `CLIPDROP_TEST_DIR` and saves a 19 s YouTube video as MP3 and MP4.
+    /// Network test: installs ffmpeg and Deno into `CLIPDROP_TEST_DIR` and saves a 19 s YouTube video
+    /// as MP3 and MP4, then again (found as already saved), then a clip of it.
     /// Run with `CLIPDROP_TEST_DIR=<dir> cargo test youtube_to_mp3 -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -1198,44 +1359,137 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         let bin_dir = base.join("bin");
         let ffmpeg = find_ffmpeg(&bin_dir).map_or_else(|| install_ffmpeg(&bin_dir), Ok).expect("ffmpeg");
         let deno = find_deno(&bin_dir).map_or_else(|| install_deno(&bin_dir), Ok).expect("deno");
-        let settings = Settings {
-            download_dir: base.join("out").to_string_lossy().into_owned(),
-            ..Default::default()
+        let out = base.join("out");
+        let _ = std::fs::remove_dir_all(&out);
+        let settings = Settings { download_dir: out.to_string_lossy().into_owned(), ..Default::default() };
+        let url = "https://www.youtube.com/watch?v=jNQXAC9IVRw";
+        let run = |format, clip, on_event: &mut dyn FnMut(Event)| {
+            download(&ytdlp, url, Platform::Youtube, format, clip, &settings, Some(&ffmpeg), Some(&deno), &Stopper::default(), on_event)
         };
+
         let mut converting = false;
-        let files = download(
-            &ytdlp,
-            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
-            Platform::Youtube,
-            Format::Mp3,
-            &settings,
-            Some(&ffmpeg),
-            Some(&deno),
-            &Stopper::default(),
-            |e| converting |= matches!(e, Event::Converting),
-        )
-        .expect("download");
+        let saved = run(Format::Mp3, None, &mut |e| converting |= matches!(e, Event::Converting)).expect("download");
         assert!(converting, "never reported the MP3 conversion step");
-        assert_eq!(files.len(), 1);
-        assert!(files[0].ends_with(".mp3"), "{files:?}");
-        println!("saved {}", files[0]);
+        assert!(!saved.already_saved);
+        assert_eq!(saved.files.len(), 1);
+        assert!(saved.files[0].ends_with(".mp3"), "{saved:?}");
+        println!("saved {}", saved.files[0]);
 
         // The same video from the MP4 box: merged into an mp4 (needs ffmpeg and Deno for YouTube).
-        let files = download(
-            &ytdlp,
-            "https://www.youtube.com/watch?v=jNQXAC9IVRw",
-            Platform::Youtube,
-            Format::Mp4,
-            &settings,
-            Some(&ffmpeg),
-            Some(&deno),
-            &Stopper::default(),
-            |_| {},
-        )
-        .expect("mp4 download");
-        assert_eq!(files.len(), 1);
-        assert!(files[0].ends_with(".mp4"), "{files:?}");
-        println!("saved {}", files[0]);
+        let video = run(Format::Mp4, None, &mut |_| {}).expect("mp4 download");
+        assert_eq!(video.files.len(), 1);
+        assert!(video.files[0].ends_with(".mp4"), "{video:?}");
+        println!("saved {}", video.files[0]);
+
+        // Both again: found in the folder, nothing downloaded or converted, nothing left behind.
+        for (format, first) in [(Format::Mp3, &saved), (Format::Mp4, &video)] {
+            let before = std::fs::read_dir(&out).unwrap().count();
+            let mut progressed = false;
+            let mut dests = Vec::new();
+            let again = run(format, None, &mut |e| match e {
+                Event::Progress { .. } | Event::Converting => progressed = true,
+                Event::Destination(d) => dests.push(d),
+                _ => {}
+            })
+            .expect("already saved");
+            assert!(again.already_saved, "{format:?} downloaded again");
+            assert!(!progressed, "{format:?} fetched data although the file was there");
+            assert_eq!(again.files, first.files);
+            // The app tidies up after an already-saved job the same way (e.g. a fetched thumbnail).
+            remove_partial_files(&dests, &settings.download_dir);
+            assert_eq!(std::fs::read_dir(&out).unwrap().count(), before, "{format:?} left files behind");
+        }
+
+        // A clip: its own file, a few seconds long instead of 19.
+        let clip = Clip::parse("0:05", "0:08").unwrap();
+        let cut = run(Format::Mp3, clip, &mut |_| {}).expect("clip");
+        assert!(!cut.already_saved);
+        assert!(cut.files[0].contains("(clip 0m05s-0m08s)"), "{cut:?}");
+        let whole = std::fs::metadata(&saved.files[0]).unwrap().len();
+        let part = std::fs::metadata(&cut.files[0]).unwrap().len();
+        assert!(part * 3 < whole, "clip ({part} bytes) isn't much smaller than the whole ({whole} bytes)");
+        println!("saved {}", cut.files[0]);
+        println!("folder: {:?}", std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn parses_clip_times() {
+        assert_eq!(parse_time("45"), Some(45));
+        assert_eq!(parse_time("1:10"), Some(70));
+        assert_eq!(parse_time("01:02:03"), Some(3723));
+        for bad in ["", "1:", ":30", "1:60", "1:2:3:4", "-5", "1.5", "a", "1 0", "9999999"] {
+            assert_eq!(parse_time(bad), None, "{bad}");
+        }
+        assert_eq!(Clip::parse("", "").unwrap(), None);
+        assert_eq!(Clip::parse("0:00", " ").unwrap(), None); // the whole video
+        assert_eq!(Clip::parse("0:30", "1:10").unwrap(), Some(Clip { start: 30, end: Some(70) }));
+        assert_eq!(Clip::parse("", "1:10").unwrap(), Some(Clip { start: 0, end: Some(70) }));
+        assert_eq!(Clip::parse("2:00", "").unwrap(), Some(Clip { start: 120, end: None }));
+        assert!(Clip::parse("1:10", "0:30").is_err());
+        assert!(Clip::parse("1:10", "1:10").is_err());
+        assert!(Clip::parse("soon", "").unwrap_err().contains("soon"));
+
+        let clip = Clip { start: 30, end: Some(3725) };
+        assert_eq!(clip.section(), "*30-3725");
+        assert_eq!(clip.file_suffix(), " (clip 0m30s-1h02m05s)");
+        assert_eq!(Clip { start: 90, end: None }.section(), "*90-inf");
+        assert_eq!(Clip { start: 90, end: None }.file_suffix(), " (clip 1m30s-end)");
+    }
+
+    #[test]
+    fn quality_and_clip_shape_the_yt_dlp_options() {
+        let tool = Path::new(r"C:\tools\x.exe");
+        let args_for = |quality, clip, ffmpeg| -> Vec<String> {
+            let settings = Settings { video_quality: quality, ..test_settings() };
+            build_args(Platform::Youtube, Format::Mp4, clip, &settings, ffmpeg, Some(tool))
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect()
+        };
+        let value = |args: &[String], flag: &str| args.windows(2).find(|w| w[0] == flag).map(|w| w[1].clone());
+
+        let f720 = value(&args_for(VideoQuality::P720, None, Some(tool)), "-f").unwrap();
+        assert!(f720.starts_with("bv*[vcodec^=avc1][height<=720]+"), "{f720}");
+        assert!(!f720.contains("1080"));
+        let f1080 = value(&args_for(VideoQuality::P1080, None, Some(tool)), "-f").unwrap();
+        assert!(f1080.starts_with("bv*[vcodec^=avc1][height<=1080]+"), "{f1080}");
+        assert_eq!(value(&args_for(VideoQuality::Best, None, Some(tool)), "-f").unwrap(), "bv*+ba/b");
+        // Without ffmpeg the cap still applies to single-file formats.
+        assert!(value(&args_for(VideoQuality::P720, None, None), "-f").unwrap().starts_with("b[height<=720]"));
+
+        let plain = args_for(VideoQuality::P1080, None, Some(tool));
+        assert!(!plain.iter().any(|a| a == "--download-sections"));
+        let clip = Some(Clip { start: 30, end: Some(70) });
+        let cut = args_for(VideoQuality::P1080, clip, Some(tool));
+        assert_eq!(value(&cut, "--download-sections").unwrap(), "*30-70");
+        assert_eq!(value(&cut, "-o").unwrap(), "%(title).90s (clip 0m30s-1m10s) (%(id)s).%(ext)s");
+        assert!(Format::Mp4.needs_ffmpeg(Platform::Twitter, clip));
+        assert!(!Format::Mp4.needs_ffmpeg(Platform::Twitter, None));
+    }
+
+    #[test]
+    fn finds_a_file_saved_by_an_earlier_download() {
+        let base = std::env::temp_dir().join(format!("clipdrop_dupe_{}", std::process::id()));
+        let dir = base.join("downloads");
+        std::fs::create_dir_all(&dir).unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        let video = dir.join("Song (abc).mp4");
+        let song = dir.join("Song [abc].mp3");
+        let planned_mp3 = dir.join("Song [abc].webm").to_string_lossy().into_owned();
+        let planned_mp4 = video.to_string_lossy().into_owned();
+
+        assert_eq!(finished_file(&planned_mp4, Format::Mp4, &d), None);
+        assert_eq!(finished_file(&planned_mp3, Format::Mp3, &d), None);
+        std::fs::write(&video, b"x").unwrap();
+        std::fs::write(&song, b"x").unwrap();
+        assert!(finished_file(&planned_mp4, Format::Mp4, &d).unwrap().ends_with("Song (abc).mp4"));
+        // An MP3 job plans the source's extension; the finished file is the .mp3.
+        assert!(finished_file(&planned_mp3, Format::Mp3, &d).unwrap().ends_with("Song [abc].mp3"));
+        // A file outside the download folder doesn't count.
+        let outside = base.join("Song (abc).mp4");
+        std::fs::write(&outside, b"x").unwrap();
+        assert_eq!(finished_file(&outside.to_string_lossy(), Format::Mp4, &d), None);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -1341,7 +1595,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         let run = |stop_at: Option<f64>| {
             let stopper = Stopper::default();
             let mut dests = Vec::new();
-            let result = download(&ytdlp, url, Platform::Youtube, Format::Mp4, &settings, Some(&ffmpeg), Some(&deno), &stopper, |e| match e {
+            let result = download(&ytdlp, url, Platform::Youtube, Format::Mp4, None, &settings, Some(&ffmpeg), Some(&deno), &stopper, |e| match e {
                 Event::Destination(d) => dests.push(d),
                 Event::Progress { downloaded, total: Some(total), .. }
                     if stop_at.is_some_and(|at| downloaded / total >= at) =>
@@ -1356,20 +1610,20 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
 
         // Pause: stopped partway, partial files stay for the resume.
         let (result, dests) = run(Some(0.2));
-        assert_eq!(result.unwrap_err(), STOPPED);
+        assert_eq!(result.unwrap_err().message, STOPPED);
         assert_eq!(dests.len(), 1, "{dests:?}");
         println!("after pause: {:?}", leftovers());
         assert!(leftovers().iter().any(|n| n.contains(".part")), "no partial file to resume from");
 
         // Resume finishes it.
         let (result, _) = run(None);
-        let files = result.expect("resumed download");
+        let files = result.expect("resumed download").files;
         assert!(files[0].ends_with(".mp4"));
         std::fs::remove_file(&files[0]).unwrap();
 
         // Stop: partial files are removed.
         let (result, dests) = run(Some(0.2));
-        assert_eq!(result.unwrap_err(), STOPPED);
+        assert_eq!(result.unwrap_err().message, STOPPED);
         remove_partial_files(&dests, &settings.download_dir);
         assert!(leftovers().is_empty(), "left behind: {:?}", leftovers());
     }

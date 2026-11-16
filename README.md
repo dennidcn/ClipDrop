@@ -23,10 +23,14 @@ Copy a link, then paste it into one of the two boxes and press **Download**:
 
 | Box | What you get |
 |-----|--------------|
-| **Video (MP4)** | The video as an mp4 (H.264, up to 1080p), which plays everywhere, named after the post's title. |
+| **Video (MP4)** | The video as an mp4, named after the post's title. Up to 1080p H.264 by default, which plays everywhere; Settings → **Video quality** offers 720p for slow connections or **Best** (up to 4K on YouTube, in VP9/AV1, which some older players can't open). |
 | **Audio (MP3)** | Just the audio as an MP3, named after the title, with title, artist and thumbnail as cover art. |
 
 Both boxes take links from any supported site, so you can grab a TikTok's sound as an MP3 or a YouTube video as an MP4. The same post can be saved both ways. Files go to `Downloads\ClipDrop`; you can change this in Settings.
+
+**Saving part of a video:** click the scissors next to a box and fill in **From** and **To** (like `0:30` and `1:10`; leave **To** empty to go to the end) before pressing **Download**. Handy for keeping just the song from a long YouTube video. Clips are named with their range, so they don't clash with the whole video. Cuts land on the nearest keyframe, so a video clip can start a second or two early.
+
+Three downloads run at once and the rest wait their turn; change this under **Downloads at once** in Settings.
 
 Closing the window quits ClipDrop. If something is still downloading it asks first, and quitting stops those downloads. The tray icon has **Check for updates**.
 
@@ -39,9 +43,11 @@ Closing the window quits ClipDrop. If something is still downloading it asks fir
 | TikTok      | `tiktok.com/@<user>/video/<id>`, `vm.tiktok.com/<code>`, `vt.tiktok.com/<code>`, `tiktok.com/t/<code>` |
 | YouTube     | `youtube.com/watch?v=<id>`, `youtu.be/<id>`, `/shorts/<id>`, `/live/<id>`, `m.youtube.com`, `music.youtube.com` |
 
-Links are normalised, so pasting the same post twice into the same box (for example the `twitter.com` and `x.com` versions) only downloads it once. Playlists, channels and live streams aren't downloaded.
+Links are normalised, so pasting the same post twice into the same box (for example the `twitter.com` and `x.com` versions) only downloads it once. If the file is already in your download folder from an earlier session, ClipDrop doesn't download it again; it shows **Already saved** with the usual open and folder buttons. Playlists, channels and live streams aren't downloaded.
 
 ## Troubleshooting
+
+When a download fails, ClipDrop says why in one sentence (private post, sign-in needed, not available in your country, deleted) and, where there is one, offers the fix as a button: **Browser sign-in** jumps to that setting, and **Update and retry** updates the download engine and tries again. Hover over the error to see yt-dlp's original message.
 
 - **Instagram says you need to log in.** In Settings, turn on **Use browser sign-in** and pick the browser you're logged in with, so yt-dlp can use that session. Firefox works most reliably; close Chrome or Edge first, because they lock their cookie database. This setting applies to every site, including YouTube, so leave it on **None** unless you need it.
 - **A site stopped working.** These sites change often. In Settings, click **Check for updates** under **Downloader engine** first; most breakages are fixed in yt-dlp within days.

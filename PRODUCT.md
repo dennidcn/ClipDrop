@@ -30,8 +30,9 @@ A native desktop app instead of an ad-laden downloader website: paste a link and
 
 - Detects post links from X/Twitter (including fx/vx mirrors), Instagram (reel, p, tv) and TikTok (full and short links). Duplicate copies of the same post are ignored.
 - Also detects YouTube links (watch, youtu.be, shorts, live, YouTube Music). Two paste boxes, Video (MP4) and Audio (MP3), each accept any supported site; the box decides the format, and the same post can be saved both ways. MP3s get title, artist and cover art. ffmpeg and Deno (yt-dlp's sandboxed JavaScript runtime for YouTube) are fetched once on first use if they aren't on `PATH`; nobody needs Node.js or anything else installed.
-- Job states: downloading (with progress and speed, then "converting" for MP3s), done (open or show in folder), error (retry). Pasted links start at once.
-- Settings: notifications, download folder, browser cookies for logged-in Instagram, update yt-dlp.
+- Job states: downloading (with progress and speed, then "converting" for MP3s), paused, stopped, done (open or show in folder; "Already saved" when the file was already in the folder from an earlier session, in which case nothing is downloaded), error (one plain sentence plus at most one fix button, Browser sign-in or Update and retry, next to retry). Pasted links start at once; up to the "Downloads at once" setting run together.
+- Optional trim: a scissors toggle next to each box reveals From/To fields so only part of a video is saved (yt-dlp `--download-sections`). Clips are separate jobs and files from the whole video.
+- Settings: download folder, video quality (720p, 1080p default, Best), downloads at once (1–5, default 3), notifications, browser cookies for logged-in Instagram, update yt-dlp.
 - Closing the window quits the app (with a confirmation if downloads are running, which are then stopped).
 - Frontend is plain HTML/CSS/JS with no bundler. Fonts and assets must be served locally (CSP `default-src 'self'`).
 
