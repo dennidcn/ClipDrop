@@ -100,13 +100,28 @@ enum Halt {
 /// Lets the pause and stop buttons reach one run of a job's download.
 #[derive(Default)]
 struct Control {
-    halt: Mutex<Option<Halt>>,
+    state: Mutex<ControlState>,
     stopper: downloader::Stopper,
+}
+
+#[derive(Default)]
+struct ControlState {
+    halt: Option<Halt>,
+    /// Set once the run is past fetching tools and waiting for a slot, just before yt-dlp starts.
+    /// Until then a pause or stop takes effect at once and the run exits without touching the job.
+    started: bool,
 }
 
 impl Control {
     fn halt(&self) -> Option<Halt> {
-        *self.halt.lock().unwrap()
+        self.state.lock().unwrap().halt
+    }
+
+    /// Marks the run as starting its download. Returns false if it was paused or stopped first.
+    fn begin(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.started = state.halt.is_none();
+        state.started
     }
 }
 
@@ -413,70 +428,69 @@ fn spawn_download(app: AppHandle, job: Job, control: Arc<Control>) {
             let deno = if needs_deno { ensure_deno(&app) } else { None };
             Ok((ytdlp, ffmpeg, deno))
         });
-        // A job paused or stopped while queued gives up its place without starting.
+        // A job paused or stopped while fetching tools or queued gives up its place without
+        // starting. `halt_job` has already updated it, and it may have been resumed since, so
+        // this run leaves the job alone.
         let permit = state.limiter.acquire(|| control.halt().is_some());
-
-        let result = match permit {
-            None => Err(String::new()),
-            Some(_) => tools.and_then(|(ytdlp, ffmpeg, deno)| {
-                let settings = state.settings.lock().unwrap().clone();
-                let mut last_emit = Instant::now() - Duration::from_secs(1);
-                let on_event = |event| match event {
-                    downloader::Event::Title(title) => {
-                        update_job(&app, id, |j| j.title = Some(title));
-                    }
-                    downloader::Event::Progress { downloaded, total, speed } => {
-                        // yt-dlp prints progress very often; throttle UI updates.
-                        if last_emit.elapsed() < Duration::from_millis(150) {
-                            return;
-                        }
-                        last_emit = Instant::now();
-                        update_job(&app, id, |j| {
-                            if let Some(total) = total.filter(|t| *t > 0.0) {
-                                j.progress = (downloaded / total).clamp(0.0, 1.0);
-                            }
-                            j.speed = speed;
-                        });
-                    }
-                    downloader::Event::Converting => {
-                        update_job(&app, id, |j| {
-                            j.converting = true;
-                            j.progress = 1.0;
-                            j.speed = None;
-                        });
-                    }
-                    downloader::Event::Destination(dest) => {
-                        let mut jobs = state.jobs.lock().unwrap();
-                        if let Some(j) = jobs.iter_mut().find(|j| j.id == id)
-                            && !j.destinations.contains(&dest)
-                        {
-                            j.destinations.push(dest);
-                        }
-                    }
-                    downloader::Event::File(file) => {
-                        update_job(&app, id, |j| j.file = Some(file));
-                    }
-                };
-                downloader::download(
-                    &ytdlp,
-                    &job.url,
-                    job.platform,
-                    job.format,
-                    &settings,
-                    ffmpeg.as_deref(),
-                    deno.as_deref(),
-                    &control.stopper,
-                    on_event,
-                )
-            }),
-        };
-
-        {
-            let mut controls = state.controls.lock().unwrap();
-            if controls.get(&id).is_some_and(|c| Arc::ptr_eq(c, &control)) {
-                controls.remove(&id);
-            }
+        if permit.is_none() || !control.begin() {
+            forget_control(&state, id, &control);
+            return;
         }
+
+        let result = tools.and_then(|(ytdlp, ffmpeg, deno)| {
+            let settings = state.settings.lock().unwrap().clone();
+            let mut last_emit = Instant::now() - Duration::from_secs(1);
+            let on_event = |event| match event {
+                downloader::Event::Title(title) => {
+                    update_job(&app, id, |j| j.title = Some(title));
+                }
+                downloader::Event::Progress { downloaded, total, speed } => {
+                    // yt-dlp prints progress very often; throttle UI updates.
+                    if last_emit.elapsed() < Duration::from_millis(150) {
+                        return;
+                    }
+                    last_emit = Instant::now();
+                    update_job(&app, id, |j| {
+                        if let Some(total) = total.filter(|t| *t > 0.0) {
+                            j.progress = (downloaded / total).clamp(0.0, 1.0);
+                        }
+                        j.speed = speed;
+                    });
+                }
+                downloader::Event::Converting => {
+                    update_job(&app, id, |j| {
+                        j.converting = true;
+                        j.progress = 1.0;
+                        j.speed = None;
+                    });
+                }
+                downloader::Event::Destination(dest) => {
+                    let mut jobs = state.jobs.lock().unwrap();
+                    if let Some(j) = jobs.iter_mut().find(|j| j.id == id)
+                        && !j.destinations.contains(&dest)
+                    {
+                        j.destinations.push(dest);
+                    }
+                }
+                downloader::Event::File(file) => {
+                    update_job(&app, id, |j| j.file = Some(file));
+                }
+            };
+            downloader::download(
+                &ytdlp,
+                &job.url,
+                job.platform,
+                job.format,
+                &settings,
+                ffmpeg.as_deref(),
+                deno.as_deref(),
+                &control.stopper,
+                on_event,
+            )
+        });
+        drop(permit);
+
+        forget_control(&state, id, &control);
         let halt = control.halt();
         let mut leftovers = Vec::new();
         let finished = update_job(&app, id, |j| {
@@ -489,11 +503,7 @@ fn spawn_download(app: AppHandle, job: Job, control: Arc<Control>) {
                     j.file = files.last().cloned();
                 }
                 (Err(_), Some(Halt::Pause)) => j.status = JobStatus::Paused,
-                (Err(_), Some(Halt::Stop)) => {
-                    j.status = JobStatus::Stopped;
-                    j.progress = 0.0;
-                    leftovers = std::mem::take(&mut j.destinations);
-                }
+                (Err(_), Some(Halt::Stop)) => leftovers = mark_stopped(j),
                 (Err(e), None) => {
                     j.status = JobStatus::Error;
                     j.error = Some(e.clone());
@@ -502,7 +512,7 @@ fn spawn_download(app: AppHandle, job: Job, control: Arc<Control>) {
         });
         if !leftovers.is_empty() {
             let dir = state.settings.lock().unwrap().download_dir.clone();
-            downloader::remove_partial_files(&leftovers, &dir);
+            downloader::remove_partial_files(&leftovers, job.format, &dir);
         }
         if let Some(job) = finished.filter(|j| matches!(j.status, JobStatus::Done | JobStatus::Error)) {
             notify(&app, &job);
@@ -510,37 +520,65 @@ fn spawn_download(app: AppHandle, job: Job, control: Arc<Control>) {
     });
 }
 
-/// Ends a job's download for the pause or stop button. A running download is killed and its
-/// worker then marks the job paused or stopped; stopping a paused job happens right here.
+/// Removes a finished run's `Control`, unless the job has been restarted with a new one.
+fn forget_control(state: &AppState, id: u64, control: &Arc<Control>) {
+    let mut controls = state.controls.lock().unwrap();
+    if controls.get(&id).is_some_and(|c| Arc::ptr_eq(c, control)) {
+        controls.remove(&id);
+    }
+}
+
+/// Marks a job stopped and returns the destinations whose partial files should be deleted.
+fn mark_stopped(job: &mut Job) -> Vec<String> {
+    job.status = JobStatus::Stopped;
+    job.progress = 0.0;
+    std::mem::take(&mut job.destinations)
+}
+
+/// Ends a job's download for the pause or stop button. If yt-dlp is running it is killed, and
+/// the worker marks the job paused or stopped once it has exited (so a quick Resume can't start
+/// a second yt-dlp on the same partial files). A job that hasn't started yt-dlp (still fetching
+/// tools or waiting for a slot) or is already paused is updated right here.
 fn halt_job(app: &AppHandle, id: u64, halt: Halt) {
     let state = app.state::<AppState>();
     let mut jobs = state.jobs.lock().unwrap();
     let Some(job) = jobs.iter_mut().find(|j| j.id == id) else { return };
-    match job.status {
+    let leftovers = match job.status {
         JobStatus::Downloading => {
             let Some(control) = state.controls.lock().unwrap().get(&id).cloned() else { return };
-            drop(jobs);
-            {
-                let mut current = control.halt.lock().unwrap();
+            let started = {
+                let mut current = control.state.lock().unwrap();
                 // Stop wins if both are pressed before the download has ended.
-                if *current != Some(Halt::Stop) {
-                    *current = Some(halt);
+                if current.halt != Some(Halt::Stop) {
+                    current.halt = Some(halt);
                 }
+                current.started
+            };
+            if started {
+                drop(jobs);
+                control.stopper.stop();
+                return;
             }
-            control.stopper.stop();
+            // The worker exits as soon as it notices; wake it if it's queued for a slot.
             state.limiter.wake_all();
+            job.speed = None;
+            match halt {
+                Halt::Pause => {
+                    job.status = JobStatus::Paused;
+                    Vec::new()
+                }
+                Halt::Stop => mark_stopped(job),
+            }
         }
-        JobStatus::Paused if halt == Halt::Stop => {
-            job.status = JobStatus::Stopped;
-            job.progress = 0.0;
-            let leftovers = std::mem::take(&mut job.destinations);
-            let job = job.clone();
-            drop(jobs);
-            let _ = app.emit("job-updated", &job);
-            let dir = state.settings.lock().unwrap().download_dir.clone();
-            std::thread::spawn(move || downloader::remove_partial_files(&leftovers, &dir));
-        }
-        _ => {}
+        JobStatus::Paused if halt == Halt::Stop => mark_stopped(job),
+        _ => return,
+    };
+    let job = job.clone();
+    drop(jobs);
+    let _ = app.emit("job-updated", &job);
+    if !leftovers.is_empty() {
+        let dir = state.settings.lock().unwrap().download_dir.clone();
+        std::thread::spawn(move || downloader::remove_partial_files(&leftovers, job.format, &dir));
     }
 }
 
@@ -861,4 +899,39 @@ fn request_quit(app: AppHandle) {
             app.exit(0);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn halt_before_begin_keeps_the_run_from_starting() {
+        // Paused while fetching tools: the run must not start yt-dlp.
+        let control = Control::default();
+        control.state.lock().unwrap().halt = Some(Halt::Pause);
+        assert!(!control.begin());
+        assert!(!control.state.lock().unwrap().started);
+
+        // Started first: halt_job sees `started` and kills the process instead.
+        let control = Control::default();
+        assert!(control.begin());
+        assert!(control.state.lock().unwrap().started);
+    }
+
+    #[test]
+    fn queued_waiter_gives_up_its_slot_when_halted() {
+        let limiter = Arc::new(DownloadLimiter::new());
+        let held: Vec<_> = (0..MAX_CONCURRENT_DOWNLOADS).map(|_| limiter.acquire(|| false).unwrap()).collect();
+        let halted = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let (limiter, halted) = (limiter.clone(), halted.clone());
+            std::thread::spawn(move || limiter.acquire(|| halted.load(Ordering::SeqCst)).is_none())
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        halted.store(true, Ordering::SeqCst);
+        limiter.wake_all();
+        assert!(waiter.join().unwrap(), "halted waiter still got a slot");
+        drop(held);
+    }
 }

@@ -443,6 +443,15 @@ impl Format {
     pub fn needs_ffmpeg(self, platform: Platform) -> bool {
         self == Format::Mp3 || platform == Platform::Youtube
     }
+
+    /// Extensions of the files this format ends up saving. For MP3 any other media file is
+    /// the downloaded audio before conversion.
+    fn finished_extensions(self) -> &'static [&'static str] {
+        match self {
+            Format::Mp3 => &["mp3"],
+            Format::Mp4 => ALLOWED_MEDIA_EXTENSIONS,
+        }
+    }
 }
 
 /// Whether yt-dlp needs a JavaScript runtime (Deno) for this site.
@@ -578,9 +587,11 @@ fn kill_tree(pid: u32) {
 }
 
 /// Deletes what a stopped download left in the folder: `.part`/`.ytdl` files, unmerged streams
-/// (`name.f137.mp4`), ffmpeg temp files and thumbnails. `destinations` are the paths yt-dlp
-/// reported (see `Event::Destination`). Files that look finished (`name.mp4`) are kept.
-pub fn remove_partial_files(destinations: &[String], download_dir: &str) {
+/// (`name.f137.mp4`), ffmpeg temp files and thumbnails, plus for MP3 jobs the downloaded audio
+/// awaiting conversion (`name.webm`). `destinations` are the paths yt-dlp reported (see
+/// `Event::Destination`). Files that look finished for `format` (`name.mp4`, `name.mp3`) are kept.
+pub fn remove_partial_files(destinations: &[String], format: Format, download_dir: &str) {
+    let finished_extensions = format.finished_extensions();
     let Ok(dir) = dunce::canonicalize(download_dir) else { return };
     let mut doomed = Vec::new();
     for dest in destinations {
@@ -598,7 +609,7 @@ pub fn remove_partial_files(destinations: &[String], download_dir: &str) {
             let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(stem)?.strip_prefix('.')) else {
                 continue;
             };
-            let finished = ALLOWED_MEDIA_EXTENSIONS.iter().any(|ext| rest.eq_ignore_ascii_case(ext));
+            let finished = finished_extensions.iter().any(|ext| rest.eq_ignore_ascii_case(ext));
             if !finished && entry.file_type().is_ok_and(|t| t.is_file()) {
                 doomed.push(entry.path());
             }
@@ -1247,18 +1258,30 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
             std::fs::write(dir.join(name), b"x").unwrap();
         }
         let dest = dir.join(format!("{stem}.mp4")).to_string_lossy().into_owned();
-        remove_partial_files(std::slice::from_ref(&dest), &dir.to_string_lossy());
+        remove_partial_files(std::slice::from_ref(&dest), Format::Mp4, &dir.to_string_lossy());
         for name in partial {
             assert!(!dir.join(name).exists(), "{name} should be deleted");
         }
         for name in kept {
             assert!(dir.join(name).exists(), "{name} should be kept");
         }
+
+        // MP3 stopped while converting: the downloaded audio goes too, only an .mp3 is kept.
+        let song = ["Song [id].webm", "Song [id].temp.mp3", "Song [id].webp"];
+        for name in song.iter().chain(&["Song [id].mp3"]) {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let dest = dir.join("Song [id].webm").to_string_lossy().into_owned();
+        remove_partial_files(&[dest], Format::Mp3, &dir.to_string_lossy());
+        for name in song {
+            assert!(!dir.join(name).exists(), "{name} should be deleted");
+        }
+        assert!(dir.join("Song [id].mp3").exists());
         // A destination outside the download folder is ignored.
         let outside = std::env::temp_dir().join(format!("clipdrop_outside_{}", std::process::id()));
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("x.mp4.part"), b"x").unwrap();
-        remove_partial_files(&[outside.join("x.mp4").to_string_lossy().into_owned()], &dir.to_string_lossy());
+        remove_partial_files(&[outside.join("x.mp4").to_string_lossy().into_owned()], Format::Mp4, &dir.to_string_lossy());
         assert!(outside.join("x.mp4.part").exists());
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&outside);
@@ -1361,7 +1384,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
         // Stop: partial files are removed.
         let (result, dests) = run(Some(0.2));
         assert_eq!(result.unwrap_err(), STOPPED);
-        remove_partial_files(&dests, &settings.download_dir);
+        remove_partial_files(&dests, Format::Mp4, &settings.download_dir);
         assert!(leftovers().is_empty(), "left behind: {:?}", leftovers());
     }
 }
