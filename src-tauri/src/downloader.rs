@@ -4,7 +4,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{OnceLock, mpsc};
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
@@ -375,6 +375,8 @@ pub enum Event {
     Progress { downloaded: f64, total: Option<f64>, speed: Option<f64> },
     /// The download finished and ffmpeg is converting it to MP3.
     Converting,
+    /// Where yt-dlp is about to save a file; its partial files are named after it.
+    Destination(String),
     File(String),
 }
 
@@ -462,6 +464,7 @@ pub fn download(
     settings: &Settings,
     ffmpeg: Option<&Path>,
     deno: Option<&Path>,
+    stopper: &Stopper,
     mut on_event: impl FnMut(Event),
 ) -> Result<Vec<String>, String> {
     let mut settings = settings.clone();
@@ -479,33 +482,173 @@ pub fn download(
     let mut cmd = command(ytdlp);
     cmd.args(build_args(platform, format, &settings, ffmpeg, deno));
     cmd.arg("--").arg(url).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stopper.is_stopped() {
+        return Err(STOPPED.into());
+    }
     let mut child = cmd.spawn().map_err(|e| format!("failed to start yt-dlp: {e}"))?;
-    contain(&child);
+    stopper.attach(contain(&child));
     // The match filter skips live streams silently (as do some other limits), so hint at the likely cause.
     let nothing_found = match format {
         Format::Mp3 => "Nothing was saved. If this is a live stream, try again once it has ended.",
         Format::Mp4 => "No video was found in this post. If it's a live stream, try again once it has ended.",
     };
-    read_output(&mut child, &settings.download_dir, nothing_found, &mut on_event)
+    let result = read_output(&mut child, &settings.download_dir, nothing_found, &mut on_event);
+    // Closing the download's job handle also ends anything yt-dlp left behind.
+    stopper.detach();
+    if stopper.is_stopped() && result.is_err() {
+        return Err(STOPPED.into());
+    }
+    result
+}
+
+const STOPPED: &str = "The download was stopped.";
+
+/// Lets another thread end a running download (the pause and stop buttons). A stop that comes
+/// in before yt-dlp has started still takes effect: the download then doesn't start at all.
+#[derive(Default)]
+pub struct Stopper(Mutex<StopState>);
+
+#[derive(Default)]
+struct StopState {
+    stopped: bool,
+    killer: Option<Killer>,
+}
+
+impl Stopper {
+    fn lock(&self) -> std::sync::MutexGuard<'_, StopState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Ends the download's yt-dlp process and everything it started.
+    pub fn stop(&self) {
+        let mut state = self.lock();
+        state.stopped = true;
+        if let Some(killer) = &state.killer {
+            killer.kill();
+        }
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.lock().stopped
+    }
+
+    fn attach(&self, killer: Killer) {
+        let mut state = self.lock();
+        if state.stopped {
+            killer.kill();
+        }
+        state.killer = Some(killer);
+    }
+
+    fn detach(&self) {
+        self.lock().killer = None;
+    }
+}
+
+/// Ends one download's process tree.
+enum Killer {
+    /// The download's own job object (nested in the app-wide one).
+    #[cfg(windows)]
+    Job(job::Owned),
+    /// Fallback when no job object could be made: kill by process id.
+    Pid(u32),
+}
+
+impl Killer {
+    fn kill(&self) {
+        match self {
+            #[cfg(windows)]
+            Killer::Job(job) => job.terminate(),
+            Killer::Pid(pid) => kill_tree(*pid),
+        }
+    }
+}
+
+fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let Some(root) = std::env::var_os("SystemRoot") else { return };
+        let taskkill = PathBuf::from(root).join("System32").join("taskkill.exe");
+        let _ = command(taskkill).args(["/T", "/F", "/PID", &pid.to_string()]).status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+    }
+}
+
+/// Deletes what a stopped download left in the folder: `.part`/`.ytdl` files, unmerged streams
+/// (`name.f137.mp4`), ffmpeg temp files and thumbnails. `destinations` are the paths yt-dlp
+/// reported (see `Event::Destination`). Files that look finished (`name.mp4`) are kept.
+pub fn remove_partial_files(destinations: &[String], download_dir: &str) {
+    let Ok(dir) = dunce::canonicalize(download_dir) else { return };
+    let mut doomed = Vec::new();
+    for dest in destinations {
+        let dest = Path::new(dest);
+        let (Some(parent), Some(stem)) = (dest.parent(), dest.file_stem().and_then(|s| s.to_str())) else {
+            continue;
+        };
+        let Ok(parent) = dunce::canonicalize(parent) else { continue };
+        if !parent.starts_with(&dir) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&parent) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(stem)?.strip_prefix('.')) else {
+                continue;
+            };
+            let finished = ALLOWED_MEDIA_EXTENSIONS.iter().any(|ext| rest.eq_ignore_ascii_case(ext));
+            if !finished && entry.file_type().is_ok_and(|t| t.is_file()) {
+                doomed.push(entry.path());
+            }
+        }
+    }
+    // A just-killed process can hold its files open for a moment, so retry briefly.
+    for _ in 0..20 {
+        doomed.retain(|path| std::fs::remove_file(path).is_err() && path.exists());
+        if doomed.is_empty() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    for path in doomed {
+        eprintln!("[clipdrop] couldn't delete partial file {}", path.display());
+    }
 }
 
 /// Puts a yt-dlp process in a Windows job object that kills it, and everything it starts (ffmpeg,
 /// Deno), as soon as ClipDrop exits for any reason (quit, update install, crash), so nothing keeps
 /// running hidden. Assigned right after spawn: yt-dlp's launcher unpacks itself before starting
 /// children, and children started afterwards inherit the job.
+///
+/// Each download also gets its own job, nested inside the app-wide one, so the pause and stop
+/// buttons can end just that download's process tree. Returns what ends it.
 #[cfg(windows)]
-fn contain(child: &std::process::Child) {
+fn contain(child: &std::process::Child) -> Killer {
     use std::os::windows::io::AsRawHandle;
-    let Some(job) = job::handle() else { return };
-    // SAFETY: both handles are valid; the child's handle is owned by `child`, which outlives the call.
-    let ok = unsafe { windows_sys::Win32::System::JobObjects::AssignProcessToJobObject(job, child.as_raw_handle()) };
-    if ok == 0 {
-        eprintln!("[clipdrop] couldn't add yt-dlp to the job object: {}", std::io::Error::last_os_error());
+    use windows_sys::Win32::System::JobObjects::AssignProcessToJobObject;
+    let process = child.as_raw_handle();
+    if let Some(job) = job::handle() {
+        // SAFETY: both handles are valid; the child's handle is owned by `child`, which outlives the call.
+        if unsafe { AssignProcessToJobObject(job, process) } == 0 {
+            eprintln!("[clipdrop] couldn't add yt-dlp to the job object: {}", std::io::Error::last_os_error());
+        }
     }
+    if let Some(own) = job::Owned::new() {
+        // SAFETY: as above; `own` holds a valid job handle.
+        if unsafe { AssignProcessToJobObject(own.raw(), process) } != 0 {
+            return Killer::Job(own);
+        }
+        eprintln!("[clipdrop] couldn't add yt-dlp to its own job: {}", std::io::Error::last_os_error());
+    }
+    Killer::Pid(child.id())
 }
 
 #[cfg(not(windows))]
-fn contain(_child: &std::process::Child) {}
+fn contain(child: &std::process::Child) -> Killer {
+    Killer::Pid(child.id())
+}
 
 /// Stops every running download now (yt-dlp and its children). Called just before the app exits,
 /// e.g. so an update installer doesn't find ffmpeg still holding files open.
@@ -520,10 +663,10 @@ pub fn kill_all() {
 #[cfg(windows)]
 mod job {
     use std::sync::OnceLock;
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JobObjectExtendedLimitInformation, SetInformationJobObject, TerminateJobObject,
     };
 
     /// The process-wide job. Its handle is never closed, so Windows closes it when ClipDrop exits,
@@ -531,6 +674,32 @@ mod job {
     pub fn handle() -> Option<HANDLE> {
         static JOB: OnceLock<Option<usize>> = OnceLock::new();
         JOB.get_or_init(create).map(|h| h as HANDLE)
+    }
+
+    /// A job owned by one download. Dropping it closes the handle, which (with KILL_ON_JOB_CLOSE)
+    /// ends anything still running in it.
+    pub struct Owned(usize);
+
+    impl Owned {
+        pub fn new() -> Option<Self> {
+            create().map(Owned)
+        }
+
+        pub fn raw(&self) -> HANDLE {
+            self.0 as HANDLE
+        }
+
+        pub fn terminate(&self) {
+            // SAFETY: the handle stays valid until `self` is dropped.
+            unsafe { TerminateJobObject(self.raw(), 1) };
+        }
+    }
+
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            // SAFETY: the handle was created by `create` and is closed only here.
+            unsafe { CloseHandle(self.raw()) };
+        }
     }
 
     fn create() -> Option<usize> {
@@ -601,6 +770,7 @@ fn build_args(
     cmd
     // Use JSON formatting (%()j) so embedded newlines in post titles are escaped and cannot spoof CDFILE| lines.
     .args(["--print", "before_dl:CDTITLE|%(title.0:120)j"])
+    .args(["--print", "before_dl:CDDEST|%(filename)j"])
     .args(["--print", "after_move:CDFILE|%(filepath)j"])
     .args([
         "--progress-template",
@@ -731,6 +901,10 @@ fn read_output(
                     if let Some(title) = decode_printed_value(raw_title) {
                         on_event(Event::Title(title));
                     }
+                } else if let Some(raw_dest) = line.strip_prefix("CDDEST|") {
+                    if let Some(dest) = decode_printed_value(raw_dest) {
+                        on_event(Event::Destination(dest));
+                    }
                 } else if let Some(raw_file) = line.strip_prefix("CDFILE|") {
                     if let Some(file_str) = decode_printed_value(raw_file) {
                         match validate_downloaded_file(&file_str, download_dir) {
@@ -827,6 +1001,10 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
     }
 
     /// A real yt-dlp to check our arguments against: `CLIPDROP_YTDLP`, the app-managed copy, or `PATH`.
+    /// `kill_all` ends every contained process, so tests that use the app-wide job take turns.
+    #[cfg(windows)]
+    static JOB_TESTS: Mutex<()> = Mutex::new(());
+
     fn real_ytdlp() -> Option<PathBuf> {
         if let Some(p) = std::env::var_os("CLIPDROP_YTDLP").map(PathBuf::from) {
             return Some(p);
@@ -910,7 +1088,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
             events.push(match e {
                 Event::Progress { downloaded, .. } => format!("progress {downloaded}"),
                 Event::Converting => "converting".into(),
-                Event::Title(_) | Event::File(_) => "other".into(),
+                Event::Title(_) | Event::Destination(_) | Event::File(_) => "other".into(),
             })
         };
         assert!(progress_event("CDPROG|512|1024|10", &mut on_event));
@@ -966,6 +1144,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
     #[cfg(windows)]
     #[test]
     fn kill_all_stops_contained_process_tree() {
+        let _serial = JOB_TESTS.lock().unwrap_or_else(|e| e.into_inner());
         let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
         let ping = system32.join("PING.EXE").to_string_lossy().into_owned();
         // cmd.exe starts a ping child, like yt-dlp starting ffmpeg.
@@ -1023,6 +1202,7 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
             &settings,
             Some(&ffmpeg),
             Some(&deno),
+            &Stopper::default(),
             |e| converting |= matches!(e, Event::Converting),
         )
         .expect("download");
@@ -1040,11 +1220,148 @@ fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *yt-dlp.exe
             &settings,
             Some(&ffmpeg),
             Some(&deno),
+            &Stopper::default(),
             |_| {},
         )
         .expect("mp4 download");
         assert_eq!(files.len(), 1);
         assert!(files[0].ends_with(".mp4"), "{files:?}");
         println!("saved {}", files[0]);
+    }
+
+    #[test]
+    fn removes_partial_files_but_keeps_finished_ones() {
+        let dir = std::env::temp_dir().join(format!("clipdrop_partial_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let stem = "youtube_user_abc";
+        let partial = [
+            "youtube_user_abc.mp4.part",
+            "youtube_user_abc.f137.mp4",
+            "youtube_user_abc.f137.mp4.part",
+            "youtube_user_abc.f140.m4a.ytdl",
+            "youtube_user_abc.temp.mp4",
+            "youtube_user_abc.webp",
+        ];
+        let kept = ["youtube_user_abc.mp4", "youtube_user_abcd.mp4.part", "other.mp4.part"];
+        for name in partial.iter().chain(&kept) {
+            std::fs::write(dir.join(name), b"x").unwrap();
+        }
+        let dest = dir.join(format!("{stem}.mp4")).to_string_lossy().into_owned();
+        remove_partial_files(std::slice::from_ref(&dest), &dir.to_string_lossy());
+        for name in partial {
+            assert!(!dir.join(name).exists(), "{name} should be deleted");
+        }
+        for name in kept {
+            assert!(dir.join(name).exists(), "{name} should be kept");
+        }
+        // A destination outside the download folder is ignored.
+        let outside = std::env::temp_dir().join(format!("clipdrop_outside_{}", std::process::id()));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("x.mp4.part"), b"x").unwrap();
+        remove_partial_files(&[outside.join("x.mp4").to_string_lossy().into_owned()], &dir.to_string_lossy());
+        assert!(outside.join("x.mp4.part").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    /// The stopper must end one download's process tree (like yt-dlp and its ffmpeg) and leave
+    /// other downloads running.
+    #[cfg(windows)]
+    #[test]
+    fn stopper_ends_only_its_own_process_tree() {
+        let _serial = JOB_TESTS.lock().unwrap_or_else(|e| e.into_inner());
+        let system32 = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32");
+        let ping = system32.join("PING.EXE").to_string_lossy().into_owned();
+        let spawn = || {
+            let child = command(system32.join("cmd.exe"))
+                .args(["/C", &ping, "-n", "60", "127.0.0.1"])
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            let stopper = Stopper::default();
+            stopper.attach(contain(&child));
+            (child, stopper)
+        };
+        let (mut target, stopper) = spawn();
+        let (mut other, other_stopper) = spawn();
+        assert!(matches!(stopper.lock().killer, Some(Killer::Job(_))), "no per-download job");
+        std::thread::sleep(Duration::from_millis(500));
+        stopper.stop();
+        let started = std::time::Instant::now();
+        while target.try_wait().unwrap().is_none() {
+            assert!(started.elapsed() < Duration::from_secs(5), "stopped process survived");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(other.try_wait().unwrap().is_none(), "stopping one download ended another");
+        other_stopper.stop();
+        other.wait().unwrap();
+
+        // A stop that arrives before the process is attached still ends it.
+        let early = Stopper::default();
+        early.stop();
+        let mut late = command(system32.join("cmd.exe"))
+            .args(["/C", &ping, "-n", "60", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        early.attach(contain(&late));
+        let started = std::time::Instant::now();
+        while late.try_wait().unwrap().is_none() {
+            assert!(started.elapsed() < Duration::from_secs(5), "late-attached process survived");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Network test: stops a YouTube MP4 download partway, checks partial files exist, resumes it
+    /// to completion, then stops another and checks the cleanup. Needs ffmpeg/Deno like the test above.
+    /// Run with `CLIPDROP_TEST_DIR=<dir> cargo test pause_resume -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn pause_resume_and_stop_end_to_end() {
+        let ytdlp = real_ytdlp().expect("no yt-dlp found (set CLIPDROP_YTDLP)");
+        let base = PathBuf::from(std::env::var_os("CLIPDROP_TEST_DIR").expect("set CLIPDROP_TEST_DIR"));
+        let bin_dir = base.join("bin");
+        let ffmpeg = find_ffmpeg(&bin_dir).map_or_else(|| install_ffmpeg(&bin_dir), Ok).expect("ffmpeg");
+        let deno = find_deno(&bin_dir).map_or_else(|| install_deno(&bin_dir), Ok).expect("deno");
+        let out = base.join("pause");
+        let _ = std::fs::remove_dir_all(&out);
+        let settings = Settings { download_dir: out.to_string_lossy().into_owned(), ..Default::default() };
+        // A few minutes long, so it is still downloading when stopped.
+        let url = "https://www.youtube.com/watch?v=aqz-KE-bpKQ";
+
+        let run = |stop_at: Option<f64>| {
+            let stopper = Stopper::default();
+            let mut dests = Vec::new();
+            let result = download(&ytdlp, url, Platform::Youtube, Format::Mp4, &settings, Some(&ffmpeg), Some(&deno), &stopper, |e| match e {
+                Event::Destination(d) => dests.push(d),
+                Event::Progress { downloaded, total: Some(total), .. }
+                    if stop_at.is_some_and(|at| downloaded / total >= at) =>
+                {
+                    stopper.stop();
+                }
+                _ => {}
+            });
+            (result, dests)
+        };
+        let leftovers = || std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect::<Vec<_>>();
+
+        // Pause: stopped partway, partial files stay for the resume.
+        let (result, dests) = run(Some(0.2));
+        assert_eq!(result.unwrap_err(), STOPPED);
+        assert_eq!(dests.len(), 1, "{dests:?}");
+        println!("after pause: {:?}", leftovers());
+        assert!(leftovers().iter().any(|n| n.contains(".part")), "no partial file to resume from");
+
+        // Resume finishes it.
+        let (result, _) = run(None);
+        let files = result.expect("resumed download");
+        assert!(files[0].ends_with(".mp4"));
+        std::fs::remove_file(&files[0]).unwrap();
+
+        // Stop: partial files are removed.
+        let (result, dests) = run(Some(0.2));
+        assert_eq!(result.unwrap_err(), STOPPED);
+        remove_partial_files(&dests, &settings.download_dir);
+        assert!(leftovers().is_empty(), "left behind: {:?}", leftovers());
     }
 }

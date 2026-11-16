@@ -439,6 +439,7 @@ body.inactive .app-icon { opacity: 0.5; }
 .job.downloading .job-tile { color: var(--accent); }
 .job.done .job-tile { color: var(--success); }
 .job.error .job-tile { color: var(--critical); }
+.job.paused .job-tile { color: var(--caution); }
 
 .job-body { min-width: 0; display: flex; flex-direction: column; }
 .job-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -480,6 +481,8 @@ body.inactive .app-icon { opacity: 0.5; }
   background: var(--accent);
   transition: width 0.25s var(--ease-out);
 }
+/* Fluent's paused ProgressBar: caution-colored indicator */
+.job.paused .progress-bar { background: var(--caution); }
 .progress.indeterminate::before { opacity: 0; }
 .progress.indeterminate .progress-bar {
   width: 40% !important;

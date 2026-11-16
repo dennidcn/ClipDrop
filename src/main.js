@@ -20,6 +20,9 @@ const G = {
   retry: "",
   remove: "",
   info: "",
+  pause: "",
+  resume: "",
+  stop: "",
   maximize: "",
   restore: "",
 };
@@ -67,6 +70,11 @@ function jobMeta(job) {
       const pct = job.progress > 0 ? `${Math.round(job.progress * 100)}%` : "Starting";
       return [platform, pct, formatSpeed(job.speed)].filter(Boolean).join(" · ");
     }
+    case "paused": {
+      const pct = job.progress > 0 ? `${Math.round(job.progress * 100)}%` : "";
+      return [platform, "Paused", pct].filter(Boolean).join(" · ");
+    }
+    case "stopped": return `${platform} · Stopped`;
     case "done": return `${platform} · ${fileName(job.file) || "Saved"}`;
     case "error": return job.error || "The download failed.";
   }
@@ -77,21 +85,34 @@ function jobActions(job) {
   const run = (cmd) => () => invoke(cmd, { id }).catch((e) => console.error(e));
   const actions = [];
   switch (job.status) {
+    case "downloading":
+      // Converting to MP3 takes seconds, and pausing it would only redo the conversion.
+      if (!job.converting) actions.push(iconButton(G.pause, "Pause", run("pause_download")));
+      actions.push(iconButton(G.stop, "Stop", run("stop_download")));
+      break;
+    case "paused":
+      actions.push(iconButton(G.resume, "Resume", run("start_download")));
+      actions.push(iconButton(G.stop, "Stop", run("stop_download")));
+      break;
     case "done":
       actions.push(iconButton(G.open, job.format === "mp3" ? "Play MP3" : "Open video", run("open_file")));
       actions.push(iconButton(G.folder, "Show in folder", run("reveal_file")));
       break;
     case "error":
-      actions.push(iconButton(G.retry, "Try again", run("start_download")));
+    case "stopped":
+      actions.push(iconButton(G.retry, job.status === "stopped" ? "Download again" : "Try again", run("start_download")));
       break;
   }
-  if (job.status !== "downloading") {
+  if (!IN_PROGRESS.has(job.status)) {
     actions.push(iconButton(G.remove, "Remove from list", () => removeJob(id)));
   }
   return actions;
 }
 
-const TILE = { downloading: G.download, done: G.done, error: G.error };
+/** Running or paused: can't be removed and survives "Clear". */
+const IN_PROGRESS = new Set(["downloading", "paused"]);
+
+const TILE = { downloading: G.download, paused: G.pause, stopped: G.stop, done: G.done, error: G.error };
 
 function buildRow(job) {
   const li = el("li", { class: "job" },
@@ -108,7 +129,9 @@ function buildRow(job) {
 
 /** Updates a row in place so hover and focus survive frequent progress events. */
 function patchRow(li, job) {
-  const statusChanged = li.dataset.status !== job.status;
+  // Actions are rebuilt only when they change, so hover and focus survive progress updates.
+  const actionKey = `${job.status}${job.converting ? ":converting" : ""}`;
+  const actionsChanged = li.dataset.actions !== actionKey;
   li.className = `job ${job.status}`;
   li.title = job.url;
   li.querySelector(".job-tile").textContent = TILE[job.status];
@@ -116,14 +139,14 @@ function patchRow(li, job) {
   li.querySelector(".job-meta").textContent = jobMeta(job);
 
   let bar = li.querySelector(".progress");
-  if (job.status === "downloading") {
+  if (IN_PROGRESS.has(job.status)) {
     if (!bar) {
       bar = el("div", { class: "progress", role: "progressbar", "aria-label": "Download progress" },
         el("div", { class: "progress-bar" }));
       li.querySelector(".job-body").append(bar);
     }
     const known = job.progress > 0;
-    bar.classList.toggle("indeterminate", !known);
+    bar.classList.toggle("indeterminate", !known && job.status === "downloading");
     bar.firstChild.style.width = `${Math.round(job.progress * 100)}%`;
     if (known) bar.setAttribute("aria-valuenow", Math.round(job.progress * 100));
     else bar.removeAttribute("aria-valuenow");
@@ -131,9 +154,12 @@ function patchRow(li, job) {
     bar.remove();
   }
 
-  if (statusChanged) {
-    li.dataset.status = job.status;
+  if (actionsChanged) {
+    const hadFocus = li.querySelector(".job-actions").contains(document.activeElement);
+    li.dataset.actions = actionKey;
     li.querySelector(".job-actions").replaceChildren(...jobActions(job));
+    // Pause becomes Resume in the same spot, so keyboard users don't lose their place.
+    if (hadFocus) li.querySelector(".job-actions button")?.focus();
   }
 }
 
@@ -151,7 +177,7 @@ function render() {
   });
 
   const active = list.filter((j) => j.status === "downloading").length;
-  const finished = list.length - active;
+  const finished = list.filter((j) => !IN_PROGRESS.has(j.status)).length;
   $("empty").hidden = list.length > 0;
   $("list-head").hidden = list.length === 0;
   $("count").textContent = active ? `Downloading ${active}` : "Recent";
