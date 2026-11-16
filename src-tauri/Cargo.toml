@@ -1,8 +1,9 @@
 [package]
 name = "clipdrop"
 version = "0.3.0"
-description = "Paste a link to save X/Twitter, Instagram and TikTok videos, or YouTube audio as MP3."
-authors = ["Amar McCann"]
+description = "Paste a link to save X/Twitter, Instagram, TikTok or YouTube posts as MP4 video or MP3 audio."
+authors = ["dennidcn"]
+license = "MIT"
 edition = "2024"
 
 [lib]

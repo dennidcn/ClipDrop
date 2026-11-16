@@ -2,6 +2,7 @@
   "name": "clipdrop",
   "private": true,
   "version": "0.3.0",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "dev": "tauri dev",

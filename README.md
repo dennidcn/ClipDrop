@@ -92,3 +92,7 @@ src-tauri/src/updater.rs     signed self-updates from GitHub Releases
 - **ffmpeg** converts audio to MP3, embeds the cover art, and merges separate video and audio streams. YouTube needs it for video too, because it keeps good video and audio as separate streams. ClipDrop uses an ffmpeg on your `PATH` if there is one; otherwise it downloads the [yt-dlp project's ffmpeg build](https://github.com/yt-dlp/FFmpeg-Builds). Without ffmpeg, X, Instagram and TikTok videos fall back to the best single-file format.
 - **Deno** runs the JavaScript YouTube requires before it will hand over its formats. It's yt-dlp's default runtime and runs that code with no file or network access. If Deno can't be installed, YouTube still works, possibly with fewer formats, and ClipDrop tries again next launch.
 - Downloads run in a Windows job object, so yt-dlp and anything it starts stop when ClipDrop exits, including during an update.
+
+## License
+
+[MIT](LICENSE): use, copy, change and share it however you like. ClipDrop downloads [yt-dlp](https://github.com/yt-dlp/yt-dlp), [ffmpeg](https://ffmpeg.org) and [Deno](https://deno.com) at runtime rather than bundling them; each keeps its own license.
