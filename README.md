@@ -29,6 +29,16 @@ npm run build    # release build + installer in src-tauri/target/release/bundle
 cd src-tauri && cargo test   # link-detection tests
 ```
 
+## Releasing and updates
+
+ClipDrop updates itself. It checks this repo's latest GitHub release shortly after launch and every 12 hours, and the tray menu has **Check for updates**. An update is only installed if it is signed with the release key, whose public half is in `src-tauri/tauri.conf.json`.
+
+1. Bump `version` in `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml` and `package.json`.
+2. `npm run release -- --notes "What changed"`. This builds the installer, signs it with the key in `~/.tauri/clipdrop.key` (it asks for the key's password), and writes `latest.json` next to it. Add `--publish` to create the GitHub release with `gh`.
+3. Without `--publish`, create a release tagged `v<version>` and attach `ClipDrop_<version>_x64-setup.exe` and `latest.json`.
+
+Keep a backup of `~/.tauri/clipdrop.key` and its password. Without them, installed copies can't be updated.
+
 ## Layout
 
 ```

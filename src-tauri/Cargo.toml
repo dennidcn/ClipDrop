@@ -1,6 +1,6 @@
 [package]
 name = "clipdrop"
-version = "0.1.0"
+version = "0.2.0"
 description = "Copy a link, get the video. Downloads X/Twitter, Instagram and TikTok videos from your clipboard."
 authors = ["Amar McCann"]
 edition = "2024"
@@ -25,6 +25,7 @@ arboard = { version = "3", default-features = false }
 ureq = "2"
 sha2 = "0.10"
 dunce = "1"
+tauri-plugin-updater = "2"
 
 [target.'cfg(windows)'.dependencies]
 window-vibrancy = "0.8"

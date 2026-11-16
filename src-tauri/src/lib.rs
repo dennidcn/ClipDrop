@@ -1,6 +1,7 @@
 mod downloader;
 mod links;
 mod settings;
+mod updater;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -346,6 +347,13 @@ fn show_main(app: &AppHandle) {
     }
 }
 
+/// Whether any download is running (used to warn before an update restarts the app).
+pub(crate) fn downloads_active(app: &AppHandle) -> bool {
+    let state = app.state::<AppState>();
+    let jobs = state.jobs.lock().unwrap();
+    jobs.iter().any(|j| j.status == JobStatus::Downloading)
+}
+
 fn job_file(state: &AppState, id: u64) -> Result<PathBuf, String> {
     let file = state
         .jobs
@@ -469,6 +477,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let handle = app.handle().clone();
             let mica = apply_backdrop(app);
@@ -490,16 +499,20 @@ pub fn run() {
             });
 
             spawn_clipboard_watcher(handle.clone());
+            updater::spawn_background_checks(handle.clone());
 
             let show = MenuItem::with_id(app, "show", "Show ClipDrop", true, None::<&str>)?;
+            let check_updates =
+                MenuItem::with_id(app, "check_updates", "Check for updates", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let menu = Menu::with_items(app, &[&show, &check_updates, &quit])?;
             let mut tray = TrayIconBuilder::with_id("main")
                 .tooltip("ClipDrop — watching clipboard")
                 .menu(&menu)
                 .show_menu_on_left_click(false)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main(app),
+                    "check_updates" => updater::check_now(app.clone()),
                     "quit" => app.exit(0),
                     _ => {}
                 })
