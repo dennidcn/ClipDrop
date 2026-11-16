@@ -8,6 +8,8 @@ Paste a link, get the file. ClipDrop is a small Windows app for saving posts fro
 
 Get `ClipDrop_<version>_x64-setup.exe` from the [latest release](https://github.com/dennidcn/ClipDrop/releases/latest) and run it. ClipDrop runs on Windows 10 and 11 and updates itself after that.
 
+> **"Windows protected your PC"?** The installer isn't code-signed yet, so Microsoft Defender SmartScreen warns about an "Unknown publisher" the first time. Click **More info**, then **Run anyway**. You only see this when installing; updates from inside the app don't trigger it, and each update is still checked against ClipDrop's own signing key before it's installed.
+
 There's nothing else to install. ClipDrop fetches the tools it needs the first time it needs them:
 
 - **yt-dlp** (about 24 MB) on first launch. It does the downloading.
